@@ -303,7 +303,10 @@
             <span class="font-semibold text-blue-400">{{ ((tokenTooltipData?.input_tokens || 0) + (tokenTooltipData?.output_tokens || 0) + (tokenTooltipData?.cache_creation_tokens || 0) + (tokenTooltipData?.cache_read_tokens || 0)).toLocaleString() }}</span>
           </div>
         </div>
-        <div class="absolute right-full top-1/2 h-0 w-0 -translate-y-1/2 border-b-[6px] border-r-[6px] border-t-[6px] border-b-transparent border-r-gray-900 border-t-transparent dark:border-r-gray-800"></div>
+        <div
+          class="absolute top-1/2 h-0 w-0 -translate-y-1/2 border-b-[6px] border-t-[6px] border-b-transparent border-t-transparent"
+          :class="tooltipOnLeft ? 'left-full border-l-[6px] border-l-gray-900 dark:border-l-gray-800' : 'right-full border-r-[6px] border-r-gray-900 dark:border-r-gray-800'"
+        ></div>
       </div>
     </div>
   </Teleport>
@@ -312,6 +315,7 @@
   <Teleport to="body">
     <div
       v-if="tooltipVisible"
+      ref="costTooltip"
       class="fixed z-[9999] pointer-events-none -translate-y-1/2"
       :style="{
         left: tooltipPosition.x + 'px',
@@ -442,7 +446,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { formatDateTime, formatReasoningEffort } from '@/utils/format'
 import { formatCacheTokens, formatMultiplier } from '@/utils/formatters'
@@ -556,6 +560,8 @@ function hasCostBreakdown(row: AdminUsageLog): boolean {
 }
 
 // Tooltip state - cost
+const costTooltip = ref<HTMLElement | null>(null)
+const tooltipOnLeft = ref(false)
 const tooltipVisible = ref(false)
 const tooltipPosition = ref({ x: 0, y: 0 })
 const tooltipData = ref<AdminUsageLog | null>(null)
@@ -600,13 +606,21 @@ const formatDuration = (ms: number | null | undefined): string => {
 }
 
 // Cost tooltip functions
-const showTooltip = (event: MouseEvent, row: AdminUsageLog) => {
+const showTooltip = async (event: MouseEvent, row: AdminUsageLog) => {
   const target = event.currentTarget as HTMLElement
   const rect = target.getBoundingClientRect()
   tooltipData.value = row
   tooltipPosition.value.x = rect.right + 8
   tooltipPosition.value.y = rect.top + rect.height / 2
   tooltipVisible.value = true
+  await nextTick()
+  if (!tooltipVisible.value || tooltipData.value?.id !== row.id || !costTooltip.value) return
+  const { width, height } = costTooltip.value.getBoundingClientRect()
+  tooltipOnLeft.value = rect.right + 8 + width > window.innerWidth - 8
+  const x = tooltipOnLeft.value ? rect.left - width - 8 : rect.right + 8
+  tooltipPosition.value.x = Math.max(8, Math.min(x, window.innerWidth - width - 8))
+  tooltipPosition.value.y = Math.max(height / 2 + 8,
+    Math.min(rect.top + rect.height / 2, window.innerHeight - height / 2 - 8))
 }
 
 const hideTooltip = () => {
