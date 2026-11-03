@@ -124,7 +124,7 @@ export async function routeStagedUsageCleanup(
                 FROM usage_logs ${where} ORDER BY ${sortColumn} ${sortOrder} LIMIT ? OFFSET ?
             `).bind(...values, pageSize, (page - 1) * pageSize).all() as { results?: Array<Record<string, unknown>> };
             const items = (rows.results ?? []).map((row) => ({
-                id: row.id, request_id: row.request_id, model: row.model, requested_model: row.requested_model,
+                id: Number(row.id), request_id: row.request_id, model: row.model, requested_model: row.requested_model,
                 input_tokens: row.input_tokens, output_tokens: row.output_tokens,
                 cache_creation_tokens: row.cache_creation_tokens, cache_read_tokens: row.cache_read_tokens,
                 total_cost: row.total_cost, actual_cost: row.actual_cost, billing_type: row.billing_type,
