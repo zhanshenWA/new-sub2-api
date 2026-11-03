@@ -321,7 +321,7 @@
       <div class="whitespace-nowrap rounded-lg border border-gray-700 bg-gray-900 px-3 py-2.5 text-xs text-white shadow-xl dark:border-gray-600 dark:bg-gray-800">
         <div class="space-y-1.5">
           <!-- Cost Breakdown -->
-          <div class="mb-2 border-b border-gray-700 pb-1.5">
+          <div v-if="tooltipData && hasCostBreakdown(tooltipData)" class="mb-2 border-b border-gray-700 pb-1.5">
             <div class="text-xs font-semibold text-gray-300 mb-1">{{ t('usage.costDetails') }}</div>
             <div v-if="tooltipData && tooltipData.input_cost > 0" class="flex items-center justify-between gap-4">
               <span class="text-gray-400">{{ t('admin.usage.inputCost') }}</span>
@@ -397,14 +397,17 @@
               <span class="font-medium text-white">${{ tooltipData.cache_read_cost.toFixed(6) }}</span>
             </div>
           </div>
+          <div v-if="tooltipData && !hasCostBreakdown(tooltipData)" class="mb-2 max-w-64 whitespace-normal border-b border-gray-700 pb-2 text-amber-300">
+            此历史记录未保存费用分项和单价；下方保留实际原价与扣费。
+          </div>
           <!-- Rate and Summary -->
           <div class="flex items-center justify-between gap-6">
             <span class="text-gray-400">{{ t('usage.serviceTier') }}</span>
-            <span class="font-semibold text-cyan-300">{{ getUsageServiceTierLabel(tooltipData?.service_tier, t) }}</span>
+            <span class="font-semibold text-cyan-300">{{ tooltipData?.service_tier ? getUsageServiceTierLabel(tooltipData.service_tier, t) : '未记录' }}</span>
           </div>
           <div class="flex items-center justify-between gap-6">
             <span class="text-gray-400">{{ t('usage.rate') }}</span>
-            <span class="font-semibold text-blue-400">{{ formatMultiplier(tooltipData?.rate_multiplier || 1) }}x</span>
+            <span class="font-semibold text-blue-400">{{ formatMultiplier(tooltipData?.rate_multiplier ?? 1) }}x</span>
           </div>
           <div class="flex items-center justify-between gap-6">
             <span class="text-gray-400">{{ t('usage.original') }}</span>
@@ -543,6 +546,13 @@ const handleBatchFetchIpGeo = async () => {
   } finally {
     ipGeoBatchLoading.value = false
   }
+}
+
+// Legacy ledgers have default-zero components even when the total was charged.
+// Never infer historical unit prices from today's catalog.
+function hasCostBreakdown(row: AdminUsageLog): boolean {
+  return (row.billing_mode === BILLING_MODE_TOKEN && Boolean(row.billing_tier)) ||
+    [row.input_cost, row.output_cost, row.cache_creation_cost, row.cache_read_cost, row.image_output_cost].some((cost) => (cost ?? 0) > 0)
 }
 
 // Tooltip state - cost
