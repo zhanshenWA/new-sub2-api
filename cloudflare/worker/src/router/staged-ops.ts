@@ -162,6 +162,9 @@ export async function routeStagedOps(
                 [OPS_PATHS.dashboardErrorDistribution]: () => dashboard.distribution(opsWindow(url)),
                 [OPS_PATHS.dashboardOpenAITokenStats]: () => dashboard.openaiTokens(url),
                 [OPS_PATHS.requests]: () => dashboard.requests(url),
+                [OPS_PATHS.errors]: () => dashboard.errors(url),
+                [OPS_PATHS.requestErrors]: () => dashboard.errors(url, "request"),
+                [OPS_PATHS.upstreamErrors]: () => dashboard.errors(url, "upstream"),
                 [OPS_PATHS.systemLogs]: () => dashboard.systemLogs(url),
                 [OPS_PATHS.systemLogsHealth]: () => dashboard.logHealth(),
                 [OPS_PATHS.concurrency]: async () => unavailable,
@@ -173,6 +176,8 @@ export async function routeStagedOps(
                 },
             };
             if (Object.hasOwn(queries, pathname)) return legacySuccess(await queries[pathname]());
+            const detail = /^\/api\/v1\/admin\/ops\/(?:errors|request-errors|upstream-errors)\/(\d+)$/.exec(pathname);
+            if (detail) { const row = await dashboard.errorDetail(Number(detail[1])); return row ? legacySuccess(row) : legacyError(404,"Error log not found","NOT_FOUND"); }
         }
 
         // Realtime ops signals
