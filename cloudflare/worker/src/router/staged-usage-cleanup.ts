@@ -1,3 +1,4 @@
+import { normalizeUsageDate } from "../services/usage-dates.ts";
 import { D1AuthSessionRepository } from "../repositories/auth-sessions.ts";
 import { D1AuthUserRepository } from "../repositories/auth-users.ts";
 import { AccessAuthError, AccessAuthService } from "../services/access-auth.ts";
@@ -103,9 +104,9 @@ export async function routeStagedUsageCleanup(
             }
             const model = parseOptionalString(url, "model");
             if (model) { conditions.push("model LIKE ?"); values.push(`%${model}%`); }
-            const startDate = parseOptionalString(url, "start_date");
+            const startDate = normalizeUsageDate(url.searchParams.get("start_date"), false, url.searchParams.get("timezone") ?? "UTC");
             if (startDate) { conditions.push("created_at >= ?"); values.push(startDate); }
-            const endDate = parseOptionalString(url, "end_date");
+            const endDate = normalizeUsageDate(url.searchParams.get("end_date"), true, url.searchParams.get("timezone") ?? "UTC");
             if (endDate) { conditions.push("created_at < ?"); values.push(endDate); }
             const stream = parseBoolean(url, "stream");
             if (stream !== undefined) { conditions.push("stream = ?"); values.push(stream ? 1 : 0); }
@@ -143,9 +144,9 @@ export async function routeStagedUsageCleanup(
             }
             const model = parseOptionalString(url, "model");
             if (model) { conditions.push("model LIKE ?"); values.push(`%${model}%`); }
-            const startDate = parseOptionalString(url, "start_date");
+            const startDate = normalizeUsageDate(url.searchParams.get("start_date"), false, url.searchParams.get("timezone") ?? "UTC");
             if (startDate) { conditions.push("created_at >= ?"); values.push(startDate); }
-            const endDate = parseOptionalString(url, "end_date");
+            const endDate = normalizeUsageDate(url.searchParams.get("end_date"), true, url.searchParams.get("timezone") ?? "UTC");
             if (endDate) { conditions.push("created_at < ?"); values.push(endDate); }
             const stream = parseBoolean(url, "stream");
             if (stream !== undefined) { conditions.push("stream = ?"); values.push(stream ? 1 : 0); }
