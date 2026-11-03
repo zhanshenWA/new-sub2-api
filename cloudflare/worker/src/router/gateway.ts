@@ -1,15 +1,15 @@
-import type { D1Database, D1Value } from "../types/d1.ts";
+import type { D1Database, D1Value, D1PreparedStatement } from "../types/d1.ts";
 import { classifyBackendRoute, PROXY_HOP_HEADER } from "../routes.ts";
 import { allRows, firstRow, runStatement } from "../repositories/d1.ts";
 import { routerError } from "./responses.ts";
 import { GeminiWebService } from "../services/gemini-web.ts";
 import { DeepSeekWebService } from "../services/deepseek-web.ts";
-import { ChannelPricingCatalogService } from "../services/channel-pricing-catalog.ts";
+import { ChannelPricingCatalogService, type PricingContext } from "../services/channel-pricing-catalog.ts";
 
 const pricingCatalog = new ChannelPricingCatalogService();
 
-function findModelPricing(model: string): { inputPrice: number; outputPrice: number; cacheWritePrice: number; cacheReadPrice: number } | null {
-    const result = pricingCatalog.getModelPricing(model);
+function findModelPricing(model: string, context: PricingContext = {}): { inputPrice: number; outputPrice: number; cacheWritePrice: number; cacheReadPrice: number } | null {
+    const result = pricingCatalog.getModelPricing(model, context);
     if (result.found && (result.inputPrice !== undefined || result.outputPrice !== undefined)) {
         return {
             inputPrice: result.inputPrice ?? 0,
@@ -135,6 +135,9 @@ export async function routeGateway(request: Request, env: GatewayEnv): Promise<R
     const requestedModel = typeof parsedRequestJson.model === "string" ? parsedRequestJson.model : undefined;
     const isStreamRequest = parsedRequestJson.stream === true;
     const preferredPlatform = inferPlatform(url.pathname, requestedModel);
+    if (requestedModel && !pricingCatalog.getModelPricing(requestedModel).found) {
+        return openAIError(400, "model_pricing_unavailable", "No verified price is configured for this model");
+    }
 
     const accounts = await selectAccounts(env.DB, key!.user_id, key!.group_id, MAX_ROUTING_ATTEMPTS, preferredPlatform);
     if (accounts.length === 0) return openAIError(503, "no_available_account", "No schedulable upstream account is available");
@@ -180,10 +183,13 @@ export async function routeGateway(request: Request, env: GatewayEnv): Promise<R
                     stream,
                     durationMs,
                     subscription: validSub,
-                    rateMultiplier
+                    rateMultiplier,
+                    serviceTier: typeof parsedRequestJson.service_tier === "string" ? parsedRequestJson.service_tier : undefined,
+                    cacheRetention: typeof parsedRequestJson.prompt_cache_retention === "string" ? parsedRequestJson.prompt_cache_retention : undefined
                 });
                 return withRoutingHeaders(finalized, account.id, attemptNumber, durationMs);
             } catch (err) {
+                if (err instanceof GatewayBillingError) return openAIError(500, "billing_error", "Unable to record gateway usage");
                 const message = err instanceof Error ? err.message : "Gemini Web request failed";
                 await markAccountFailure(env.DB, account.id, message);
                 lastFailure = { status: 502, code: "upstream_error", message };
@@ -224,10 +230,13 @@ export async function routeGateway(request: Request, env: GatewayEnv): Promise<R
                     stream,
                     durationMs,
                     subscription: validSub,
-                    rateMultiplier
+                    rateMultiplier,
+                    serviceTier: typeof parsedRequestJson.service_tier === "string" ? parsedRequestJson.service_tier : undefined,
+                    cacheRetention: typeof parsedRequestJson.prompt_cache_retention === "string" ? parsedRequestJson.prompt_cache_retention : undefined
                 });
                 return withRoutingHeaders(finalized, account.id, attemptNumber, durationMs);
             } catch (err) {
+                if (err instanceof GatewayBillingError) return openAIError(500, "billing_error", "Unable to record gateway usage");
                 const message = err instanceof Error ? err.message : "DeepSeek Web request failed";
                 await markAccountFailure(env.DB, account.id, message);
                 lastFailure = { status: 502, code: "upstream_error", message };
@@ -271,10 +280,13 @@ export async function routeGateway(request: Request, env: GatewayEnv): Promise<R
                 stream: isStreamRequest,
                 durationMs,
                 subscription: validSub,
-                rateMultiplier
+                rateMultiplier,
+                serviceTier: typeof parsedRequestJson.service_tier === "string" ? parsedRequestJson.service_tier : undefined,
+                cacheRetention: typeof parsedRequestJson.prompt_cache_retention === "string" ? parsedRequestJson.prompt_cache_retention : undefined
             });
             return withRoutingHeaders(finalized, account.id, attemptNumber, durationMs);
         } catch (error) {
+            if (error instanceof GatewayBillingError) return openAIError(500, "billing_error", "Unable to record gateway usage");
             const message = error instanceof Error ? error.message : "Upstream request failed";
             await markAccountFailure(env.DB, account.id, message);
             lastFailure = { status: 502, code: "upstream_error", message };
@@ -896,6 +908,59 @@ function retryAfterMs(headers: Headers): number {
     return DEFAULT_FAILURE_COOLDOWN_MS;
 }
 
+interface GatewayUsage {
+    model?: string;
+    serviceTier?: string;
+    hasUsage: boolean;
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationTokens: number;
+    cacheReadTokens: number;
+}
+
+function readGatewayUsage(data: Record<string, unknown>): GatewayUsage {
+    const objectValue = (value: unknown): Record<string, unknown> | undefined =>
+        value !== null && typeof value === "object" && !Array.isArray(value)
+            ? value as Record<string, unknown> : undefined;
+    const tokens = (value: unknown): number => {
+        const count = Number(value);
+        return Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0;
+    };
+    const payload = objectValue(data.response) ?? objectValue(data.message) ?? data;
+    const usage = objectValue(payload.usage) ?? objectValue(data.usage);
+    const metadata = objectValue(data.usageMetadata);
+    const details = objectValue(usage?.input_tokens_details) ?? objectValue(usage?.prompt_tokens_details);
+    const includedCacheRead = tokens(details?.cached_tokens ?? usage?.prompt_cache_hit_tokens ?? metadata?.cachedContentTokenCount);
+    const includedCacheWrite = tokens(details?.cache_write_tokens);
+    const totalInput = tokens(usage?.prompt_tokens ?? usage?.input_tokens ?? metadata?.promptTokenCount);
+    const model = typeof payload.model === "string" ? payload.model.trim() : undefined;
+    return {
+        model: model || undefined,
+        serviceTier: typeof payload.service_tier === "string" ? payload.service_tier : undefined,
+        hasUsage: usage !== undefined || metadata !== undefined,
+        inputTokens: Math.max(0, totalInput - includedCacheRead - includedCacheWrite),
+        outputTokens: tokens(usage?.completion_tokens ?? usage?.output_tokens ?? metadata?.candidatesTokenCount),
+        cacheCreationTokens: tokens(usage?.cache_creation_input_tokens ?? includedCacheWrite),
+        cacheReadTokens: tokens(usage?.cache_read_input_tokens ?? includedCacheRead)
+    };
+}
+
+class GatewayBillingError extends Error {}
+
+function usageWindowUpdates(windows: Array<[string, string, number]>, cost: number, nowMs: number): { sql: string; values: D1Value[] } {
+    const sql: string[] = [];
+    const values: D1Value[] = [];
+    const now = new Date(nowMs).toISOString();
+    for (const [usage, start, durationMs] of windows) {
+        const cutoff = new Date(nowMs - durationMs).toISOString();
+        const active = `julianday(${start}) > julianday(?)`;
+        sql.push(`${usage} = (CASE WHEN ${active} THEN COALESCE(${usage}, 0) ELSE 0 END) + ?`);
+        sql.push(`${start} = CASE WHEN ${active} THEN ${start} ELSE ? END`);
+        values.push(cutoff, cost, cutoff, now);
+    }
+    return { sql: sql.join(', '), values };
+}
+
 async function finalizeGatewayResponse(
     db: D1Database,
     key: GatewayKeyRow,
@@ -907,8 +972,11 @@ async function finalizeGatewayResponse(
         durationMs?: number;
         subscription?: GatewaySubscriptionRow | null;
         rateMultiplier?: number;
+        serviceTier?: string;
+        cacheRetention?: string;
     }
 ): Promise<Response> {
+    if (!response.ok) return response;
     const contentType = response.headers.get("content-type") ?? "";
     const isSse = contentType.includes("text/event-stream") || (Boolean(options.stream) && !contentType.includes("application/json"));
 
@@ -920,65 +988,25 @@ async function finalizeGatewayResponse(
         let cacheCreationTokens = 0;
         let cacheReadTokens = 0;
         let upstreamModel = options.model || "unknown";
+        let serviceTier = options.serviceTier;
 
         const processLine = (rawLine: string) => {
             const line = rawLine.trim();
-            if (!line.startsWith("data:")) return;
-            const payload = line.slice(5).trim();
+            // Some compatible upstreams label a plain JSON response as SSE.
+            const payload = line.startsWith("data:") ? line.slice(5).trim() : line.startsWith("{") ? line : "";
             if (!payload || payload === "[DONE]") return;
             try {
                 const data = JSON.parse(payload) as Record<string, unknown>;
                 if (!data || typeof data !== "object") return;
-                if (typeof data.model === "string" && data.model.trim() !== "") {
-                    upstreamModel = data.model.trim();
-                }
-                const usage = data.usage as Record<string, unknown> | undefined;
-                if (usage && typeof usage === "object") {
-                    if (usage.prompt_tokens !== undefined || usage.input_tokens !== undefined) {
-                        inputTokens = Math.max(inputTokens, Math.trunc(Number(usage.prompt_tokens ?? usage.input_tokens ?? 0) || 0));
-                    }
-                    if (usage.completion_tokens !== undefined || usage.output_tokens !== undefined) {
-                        outputTokens = Math.max(outputTokens, Math.trunc(Number(usage.completion_tokens ?? usage.output_tokens ?? 0) || 0));
-                    }
-                    if (usage.cache_creation_input_tokens !== undefined) {
-                        cacheCreationTokens = Math.max(cacheCreationTokens, Math.trunc(Number(usage.cache_creation_input_tokens) || 0));
-                    }
-                    if (usage.cache_read_input_tokens !== undefined) {
-                        cacheReadTokens = Math.max(cacheReadTokens, Math.trunc(Number(usage.cache_read_input_tokens) || 0));
-                    }
-                }
-                const message = data.message as Record<string, unknown> | undefined;
-                if (message && typeof message === "object") {
-                    if (typeof message.model === "string" && message.model.trim() !== "") {
-                        upstreamModel = message.model.trim();
-                    }
-                    const msgUsage = message.usage as Record<string, unknown> | undefined;
-                    if (msgUsage && typeof msgUsage === "object") {
-                        if (msgUsage.input_tokens !== undefined) {
-                            inputTokens = Math.max(inputTokens, Math.trunc(Number(msgUsage.input_tokens) || 0));
-                        }
-                        if (msgUsage.output_tokens !== undefined) {
-                            outputTokens = Math.max(outputTokens, Math.trunc(Number(msgUsage.output_tokens) || 0));
-                        }
-                        if (msgUsage.cache_creation_input_tokens !== undefined) {
-                            cacheCreationTokens = Math.max(cacheCreationTokens, Math.trunc(Number(msgUsage.cache_creation_input_tokens) || 0));
-                        }
-                        if (msgUsage.cache_read_input_tokens !== undefined) {
-                            cacheReadTokens = Math.max(cacheReadTokens, Math.trunc(Number(msgUsage.cache_read_input_tokens) || 0));
-                        }
-                    }
-                }
-                const usageMeta = data.usageMetadata as Record<string, unknown> | undefined;
-                if (usageMeta && typeof usageMeta === "object") {
-                    if (usageMeta.promptTokenCount !== undefined) {
-                        inputTokens = Math.max(inputTokens, Math.trunc(Number(usageMeta.promptTokenCount) || 0));
-                    }
-                    if (usageMeta.candidatesTokenCount !== undefined) {
-                        outputTokens = Math.max(outputTokens, Math.trunc(Number(usageMeta.candidatesTokenCount) || 0));
-                    }
-                }
+                const usage = readGatewayUsage(data);
+                upstreamModel = usage.model ?? upstreamModel;
+                serviceTier = usage.serviceTier ?? serviceTier;
+                inputTokens = Math.max(inputTokens, usage.inputTokens);
+                outputTokens = Math.max(outputTokens, usage.outputTokens);
+                cacheCreationTokens = Math.max(cacheCreationTokens, usage.cacheCreationTokens);
+                cacheReadTokens = Math.max(cacheReadTokens, usage.cacheReadTokens);
             } catch {
-                // Ignore non-JSON SSE lines
+                // Ignore non-JSON SSE lines.
             }
         };
 
@@ -986,6 +1014,7 @@ async function finalizeGatewayResponse(
             transform(chunk, controller) {
                 controller.enqueue(chunk);
                 buffer += decoder.decode(chunk, { stream: true });
+                if (buffer.trimStart().startsWith("{")) return;
                 const lines = buffer.split("\n");
                 buffer = lines.pop() ?? "";
                 for (const line of lines) {
@@ -994,7 +1023,7 @@ async function finalizeGatewayResponse(
             },
             async flush() {
                 buffer += decoder.decode();
-                for (const line of buffer.split("\n")) {
+                for (const line of buffer.trimStart().startsWith("{") ? [buffer] : buffer.split("\n")) {
                     processLine(line);
                 }
                 await markGatewaySuccess(db, key, accountId, {
@@ -1008,7 +1037,9 @@ async function finalizeGatewayResponse(
                     durationMs: options.durationMs,
                     forceLog: true,
                     subscription: options.subscription,
-                    rateMultiplier: options.rateMultiplier
+                    rateMultiplier: options.rateMultiplier,
+                    serviceTier,
+                    cacheRetention: options.cacheRetention
                 });
             }
         });
@@ -1027,7 +1058,9 @@ async function finalizeGatewayResponse(
         response,
         forceLog: Boolean(options.stream),
         subscription: options.subscription,
-        rateMultiplier: options.rateMultiplier
+        rateMultiplier: options.rateMultiplier,
+        serviceTier: options.serviceTier,
+        cacheRetention: options.cacheRetention
     });
     return response;
 }
@@ -1049,6 +1082,8 @@ async function markGatewaySuccess(
         forceLog?: boolean;
         subscription?: GatewaySubscriptionRow | null;
         rateMultiplier?: number;
+        serviceTier?: string;
+        cacheRetention?: string;
     }
 ): Promise<void> {
     const nowMs = Date.now();
@@ -1058,6 +1093,7 @@ async function markGatewaySuccess(
     let cacheCreationTokens = options?.cacheCreationTokens ?? 0;
     let cacheReadTokens = options?.cacheReadTokens ?? 0;
     let upstreamModel = options?.upstreamModel || options?.model || "unknown";
+    let serviceTier = options?.serviceTier;
     let hasUsage = Boolean(options?.forceLog) || inputTokens > 0 || outputTokens > 0;
 
     const resp = options?.response;
@@ -1066,22 +1102,15 @@ async function markGatewaySuccess(
         try {
             const data = await resp.clone().json() as Record<string, unknown>;
             if (data && typeof data === "object") {
-                if (typeof data.model === "string" && data.model.trim() !== "") {
-                    upstreamModel = data.model.trim();
-                }
-                const usage = data.usage as Record<string, unknown> | undefined;
-                if (usage && typeof usage === "object") {
+                const usage = readGatewayUsage(data);
+                upstreamModel = usage.model ?? upstreamModel;
+                serviceTier = usage.serviceTier ?? serviceTier;
+                if (usage.hasUsage) {
                     hasUsage = true;
-                    inputTokens = Math.max(0, Math.trunc(Number(usage.prompt_tokens ?? usage.input_tokens ?? 0) || 0));
-                    outputTokens = Math.max(0, Math.trunc(Number(usage.completion_tokens ?? usage.output_tokens ?? 0) || 0));
-                    cacheCreationTokens = Math.max(0, Math.trunc(Number(usage.cache_creation_input_tokens ?? 0) || 0));
-                    cacheReadTokens = Math.max(0, Math.trunc(Number(usage.cache_read_input_tokens ?? 0) || 0));
-                }
-                const usageMeta = data.usageMetadata as Record<string, unknown> | undefined;
-                if (usageMeta && typeof usageMeta === "object") {
-                    hasUsage = true;
-                    inputTokens = Math.max(0, Math.trunc(Number(usageMeta.promptTokenCount ?? 0) || 0));
-                    outputTokens = Math.max(0, Math.trunc(Number(usageMeta.candidatesTokenCount ?? 0) || 0));
+                    inputTokens = usage.inputTokens;
+                    outputTokens = usage.outputTokens;
+                    cacheCreationTokens = usage.cacheCreationTokens;
+                    cacheReadTokens = usage.cacheReadTokens;
                 }
             }
         } catch {
@@ -1089,142 +1118,70 @@ async function markGatewaySuccess(
         }
     }
 
-    const pricing = findModelPricing(upstreamModel);
-    const baseCost = pricing !== null
-        ? inputTokens * pricing.inputPrice +
+    const pricing = findModelPricing(upstreamModel, {
+        inputTokens: inputTokens + cacheCreationTokens + cacheReadTokens,
+        serviceTier, cacheRetention: options?.cacheRetention, timeMs: nowMs
+    });
+    if (pricing === null) throw new GatewayBillingError("No verified price is configured for upstream model or service tier");
+    const baseCost = inputTokens * pricing.inputPrice +
           outputTokens * pricing.outputPrice +
           cacheCreationTokens * pricing.cacheWritePrice +
-          cacheReadTokens * pricing.cacheReadPrice
-        : (inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens) * 0.000001;
+          cacheReadTokens * pricing.cacheReadPrice;
     const rateMultiplier = options?.rateMultiplier ?? 1;
     const costDelta = baseCost * rateMultiplier;
 
-    const resolveWindow = (start: string | null | undefined, currentUsage: number | undefined, durationMs: number) => {
-        if (!start) {
-            return { usage: (currentUsage ?? 0) + costDelta, start: now };
-        }
-        const parsed = Date.parse(start);
-        if (!Number.isFinite(parsed) || parsed + durationMs <= nowMs) {
-            return { usage: costDelta, start: now };
-        }
-        return { usage: (currentUsage ?? 0) + costDelta, start };
-    };
-
-    const win5h = resolveWindow(key.window_5h_start, key.usage_5h, 5 * 3600_000);
-    const win1d = resolveWindow(key.window_1d_start, key.usage_1d, 24 * 3600_000);
-    const win7d = resolveWindow(key.window_7d_start, key.usage_7d, 7 * 24 * 3600_000);
-
-    const statements: Promise<unknown>[] = [
-        runStatement(
-            db,
-            `UPDATE api_keys
-             SET last_used_at = ?,
-                 quota_used = quota_used + ?,
-                 usage_5h = ?,
-                 usage_1d = ?,
-                 usage_7d = ?,
-                 window_5h_start = ?,
-                 window_1d_start = ?,
-                 window_7d_start = ?,
-                 updated_at = ?
-             WHERE id = ?`,
-            [
-                now,
-                costDelta,
-                win5h.usage,
-                win1d.usage,
-                win7d.usage,
-                win5h.start,
-                win1d.start,
-                win7d.start,
-                now,
-                key.id
-            ]
-        ),
-        runStatement(
-            db,
-            "UPDATE accounts SET last_used_at = ?, updated_at = ?, error_message = NULL WHERE id = ?",
-            [now, now, accountId]
-        )
+    // D1 batches are transactional: counters, balance and ledger commit together.
+    // Window increments use current database values to avoid lost concurrent usage.
+    const keyWindows = usageWindowUpdates([
+        ["usage_5h", "window_5h_start", 5 * 3600_000],
+        ["usage_1d", "window_1d_start", 24 * 3600_000],
+        ["usage_7d", "window_7d_start", 7 * 24 * 3600_000]
+    ], costDelta, nowMs);
+    const statements: D1PreparedStatement[] = [
+        db.prepare(`UPDATE api_keys
+            SET last_used_at = ?, quota_used = COALESCE(quota_used, 0) + ?,
+                ${keyWindows.sql}, updated_at = ? WHERE id = ?`)
+            .bind(now, costDelta, ...keyWindows.values, now, key.id),
+        db.prepare("UPDATE accounts SET last_used_at = ?, updated_at = ?, error_message = NULL WHERE id = ?")
+            .bind(now, now, accountId)
     ];
 
     if (options?.subscription) {
         const sub = options.subscription;
-        const subDaily = resolveWindow(sub.daily_window_start, sub.daily_usage_usd, 24 * 3600_000);
-        const subWeekly = resolveWindow(sub.weekly_window_start, sub.weekly_usage_usd, 7 * 24 * 3600_000);
-        const subMonthly = resolveWindow(sub.monthly_window_start, sub.monthly_usage_usd, 30 * 24 * 3600_000);
-        statements.push(
-            runStatement(
-                db,
-                `UPDATE user_subscriptions
-                 SET daily_usage_usd = ?,
-                     weekly_usage_usd = ?,
-                     monthly_usage_usd = ?,
-                     daily_window_start = ?,
-                     weekly_window_start = ?,
-                     monthly_window_start = ?,
-                     updated_at = ?
-                 WHERE id = ?`,
-                [
-                    subDaily.usage,
-                    subWeekly.usage,
-                    subMonthly.usage,
-                    subDaily.start,
-                    subWeekly.start,
-                    subMonthly.start,
-                    now,
-                    sub.id
-                ]
-            )
-        );
+        const subWindows = usageWindowUpdates([
+            ["daily_usage_usd", "daily_window_start", 24 * 3600_000],
+            ["weekly_usage_usd", "weekly_window_start", 7 * 24 * 3600_000],
+            ["monthly_usage_usd", "monthly_window_start", 30 * 24 * 3600_000]
+        ], costDelta, nowMs);
+        statements.push(db.prepare(`UPDATE user_subscriptions SET ${subWindows.sql}, updated_at = ? WHERE id = ?`)
+            .bind(...subWindows.values, now, sub.id));
     } else if (costDelta > 0) {
-        statements.push(
-            runStatement(
-                db,
-                "UPDATE users SET balance = balance - ?, updated_at = ? WHERE id = ?",
-                [costDelta, now, key.user_id]
-            )
-        );
+        statements.push(db.prepare("UPDATE users SET balance = balance - ?, updated_at = ? WHERE id = ?")
+            .bind(costDelta, now, key.user_id));
     }
 
-    await Promise.all(statements);
-
     if (hasUsage || inputTokens > 0 || outputTokens > 0 || options?.forceLog) {
-        try {
-            await runStatement(
-                db,
-                `INSERT INTO usage_logs (
-                    request_id, model, requested_model, upstream_model,
-                    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-                    total_cost, actual_cost, rate_multiplier, billing_type,
-                    stream, duration_ms, created_at, api_key_id, account_id, group_id, user_id, subscription_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [
-                    crypto.randomUUID(),
-                    upstreamModel,
-                    options?.model ?? upstreamModel,
-                    upstreamModel,
-                    inputTokens,
-                    outputTokens,
-                    cacheCreationTokens,
-                    cacheReadTokens,
-                    baseCost,
-                    costDelta,
-                    rateMultiplier,
-                    options?.subscription ? 1 : 0,
-                    options?.stream ? 1 : 0,
-                    options?.durationMs ?? 0,
-                    now,
-                    key.id,
-                    accountId,
-                    key.group_id,
-                    key.user_id,
-                    options?.subscription?.id ?? null
-                ]
-            );
-        } catch {
-            // Do not fail gateway request if usage_logs insert fails
-        }
+        statements.push(db.prepare(`INSERT INTO usage_logs (
+            request_id, model, requested_model, upstream_model,
+            input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+            total_cost, actual_cost, rate_multiplier, billing_type,
+            stream, duration_ms, created_at, api_key_id, account_id, group_id, user_id, subscription_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+            .bind(
+                crypto.randomUUID(), upstreamModel, options?.model ?? upstreamModel, upstreamModel,
+                inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens,
+                baseCost, costDelta, rateMultiplier, options?.subscription ? 1 : 0,
+                options?.stream ? 1 : 0, options?.durationMs ?? 0, now,
+                key.id, accountId, key.group_id, key.user_id, options?.subscription?.id ?? null
+            ));
+    }
+
+    try {
+        const results = await db.batch(statements);
+        if (results.some(result => !result.success)) throw new Error("D1 billing batch failed");
+    } catch (error) {
+        console.error("Gateway billing transaction failed", error);
+        throw new GatewayBillingError("Unable to record gateway usage");
     }
 }
 
