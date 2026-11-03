@@ -1,3 +1,4 @@
+import { normalizeUsageDate } from "../services/usage-dates.ts";
 import { D1AuthSessionRepository } from "../repositories/auth-sessions.ts";
 import { D1AuthUserRepository } from "../repositories/auth-users.ts";
 import { AccessAuthError, AccessAuthService } from "../services/access-auth.ts";
@@ -149,11 +150,12 @@ export async function routeStagedDashboard(
 
         const period = url.searchParams.get("period") ?? "day";
         const granularity = url.searchParams.get("granularity") ?? "day";
-        const startDate = url.searchParams.get("start_date") ?? undefined;
-        const endDate = url.searchParams.get("end_date") ?? undefined;
+        const startDate = normalizeUsageDate(url.searchParams.get("start_date"), false, url.searchParams.get("timezone") ?? "UTC");
+        const endDate = normalizeUsageDate(url.searchParams.get("end_date"), true, url.searchParams.get("timezone") ?? "UTC");
         const includeStats = url.searchParams.get("include_stats") !== "false";
         const includeTrend = url.searchParams.get("include_trend") !== "false";
         const includeModelStats = url.searchParams.get("include_model_stats") !== "false";
+        const includeGroupStats = url.searchParams.get("include_group_stats") === "true";
 
         if (pathname === DASHBOARD_PATHS.snapshotV2 && method === "GET") {
             const response: Record<string, unknown> = {
@@ -174,11 +176,15 @@ export async function routeStagedDashboard(
                 const models = await svc.getModelStats(period, startDate, endDate);
                 response.models = models.map(dashboardModelStat);
             }
+            if (includeGroupStats) {
+                const groups = await svc.getGroupStats(period, startDate, endDate);
+                response.groups = groups.map((g) => ({ group_id: g.groupId, group_name: g.groupName, requests: g.requests, cost: g.cost, active_users: g.activeUsers, active_api_keys: g.activeAPIKeys }));
+            }
             return legacySuccess(response);
         }
 
         if (pathname === DASHBOARD_PATHS.stats && method === "GET") {
-            const stats = await svc.getStats(period);
+            const stats = await svc.getStats(period, startDate, endDate);
             return legacySuccess(toSnakeCase(stats as unknown as Record<string, unknown>));
         }
 
@@ -188,17 +194,17 @@ export async function routeStagedDashboard(
         }
 
         if (pathname === DASHBOARD_PATHS.trend && method === "GET") {
-            const trend = await svc.getUsageTrend(period, granularity);
-            return legacySuccess({ trend });
+            const trend = await svc.getUsageTrend(period, granularity, startDate, endDate);
+            return legacySuccess({ trend: trend.map(dashboardTrendPoint) });
         }
 
         if (pathname === DASHBOARD_PATHS.models && method === "GET") {
-            const models = await svc.getModelStats(period);
-            return legacySuccess({ models });
+            const models = await svc.getModelStats(period, startDate, endDate);
+            return legacySuccess({ models: models.map(dashboardModelStat) });
         }
 
         if (pathname === DASHBOARD_PATHS.groups && method === "GET") {
-            const groups = await svc.getGroupStats(period);
+            const groups = await svc.getGroupStats(period, startDate, endDate);
             return legacySuccess({ groups });
         }
 
