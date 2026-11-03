@@ -1,3 +1,4 @@
+import { withUsageMetadata } from "../services/usage-log-metadata.ts";
 import { normalizeUsageDate } from "../services/usage-dates.ts";
 import { D1AuthSessionRepository } from "../repositories/auth-sessions.ts";
 import { D1AuthUserRepository } from "../repositories/auth-users.ts";
@@ -390,7 +391,7 @@ export async function routeStagedUsageUser(
         if (idMatch !== null) {
             const id = Number(idMatch[1]);
             const row = await svc.getUsageById(userId, id);
-            return legacySuccess({
+            return legacySuccess((await withUsageMetadata(env.DB, [{
                 id: row.id, request_id: row.requestId, model: row.model, requested_model: row.requestedModel,
                 input_tokens: row.inputTokens, output_tokens: row.outputTokens,
                 cache_creation_tokens: row.cacheCreationTokens, cache_read_tokens: row.cacheReadTokens,
@@ -400,7 +401,7 @@ export async function routeStagedUsageUser(
                 image_count: row.imageCount, video_count: row.videoCount,
                 group_id: row.groupId, api_key_id: row.apiKeyId,
                 created_at: row.createdAt,
-            });
+            }], { userId }))[0]);
         }
 
         // GET /api/v1/usage
@@ -424,7 +425,7 @@ export async function routeStagedUsageUser(
 
             const result = await svc.listUsage(userId, page, pageSize, { apiKeyId, groupId, model, startDate, endDate, sortBy, sortOrder });
             return legacySuccess({
-                items: result.items.map((r) => ({
+                items: await withUsageMetadata(env.DB, result.items.map((r) => ({
                     id: r.id, request_id: r.requestId, model: r.model, requested_model: r.requestedModel,
                     input_tokens: r.inputTokens, output_tokens: r.outputTokens,
                     cache_creation_tokens: r.cacheCreationTokens, cache_read_tokens: r.cacheReadTokens,
@@ -435,7 +436,7 @@ export async function routeStagedUsageUser(
                     group_id: r.groupId, subscription_id: r.subscriptionId,
                     api_key_id: r.apiKeyId, account_id: r.accountId,
                     created_at: r.createdAt,
-                })),
+                })), { userId }),
                 total: result.total, page: result.page, page_size: result.pageSize,
             });
         }
