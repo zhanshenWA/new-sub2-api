@@ -47,6 +47,7 @@ export async function withUsageMetadata<T extends { id: number }>(
             rate_multiplier: row.rate_multiplier,
             billing_mode: row.billing_mode,
             billing_tier: row.billing_tier,
+            service_tier: row.billing_tier,
             input_cost: row.input_cost,
             output_cost: row.output_cost,
             cache_creation_cost: row.cache_creation_cost,
