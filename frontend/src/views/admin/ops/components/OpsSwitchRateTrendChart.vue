@@ -40,9 +40,10 @@ const colors = computed(() => ({
 }))
 
 const totalRequests = computed(() => sumNumbers(props.points.map((p) => p.request_count)))
+const hasSwitchSamples = computed(() => props.points.some((p) => typeof p.switch_count === 'number'))
 
 const chartData = computed(() => {
-  if (!props.points.length || totalRequests.value <= 0) return null
+  if (!props.points.length || totalRequests.value <= 0 || !hasSwitchSamples.value) return null
   return {
     labels: props.points.map((p) => formatHistoryLabel(p.bucket_start, props.timeRange)),
     datasets: [
@@ -143,7 +144,7 @@ const options = computed(() => {
       <Line v-if="state === 'ready' && chartData" :data="chartData" :options="options" />
       <div v-else class="flex h-full items-center justify-center">
         <div v-if="state === 'loading'" class="animate-pulse text-sm text-gray-400">{{ t('common.loading') }}</div>
-        <EmptyState v-else :title="t('common.noData')" :description="t('admin.ops.charts.emptyRequest')" />
+        <EmptyState v-else :title="t('common.noData')" :description="totalRequests > 0 && !hasSwitchSamples ? '当前 Cloudflare 版本未采集账号切换次数' : t('admin.ops.charts.emptyRequest')" />
       </div>
     </div>
   </div>
