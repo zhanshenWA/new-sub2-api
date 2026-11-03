@@ -178,7 +178,7 @@ export async function routeStagedDashboard(
             }
             if (includeGroupStats) {
                 const groups = await svc.getGroupStats(period, startDate, endDate);
-                response.groups = groups.map((g) => ({ group_id: g.groupId, group_name: g.groupName, requests: g.requests, cost: g.cost, active_users: g.activeUsers, active_api_keys: g.activeAPIKeys }));
+                response.groups = groups.map((g) => ({ group_id: g.groupId, group_name: g.groupName, requests: g.requests, cost: g.cost, actual_cost: g.actualCost, total_tokens: g.totalTokens, active_users: g.activeUsers, active_api_keys: g.activeAPIKeys }));
             }
             return legacySuccess(response);
         }
