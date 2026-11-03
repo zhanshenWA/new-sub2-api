@@ -610,3 +610,74 @@ for (const sample of [
         }
     });
 }
+
+// Official client names may differ from the compatible upstream's model ID.
+for (const sample of [
+    { stream: false, hour: 12, factor: 1 },
+    { stream: true, hour: 12, factor: 1 },
+    { stream: false, hour: 2, factor: 2 }
+]) {
+    test("model mapping: official Flash name routes and bills " + JSON.stringify(sample), async (t) => {
+        t.mock.method(Date, "now", () => Date.UTC(2026, 10, 3, sample.hour));
+        const db = await fixture();
+        await db.prepare("UPDATE accounts SET platform = 'deepseek', credentials = ? WHERE id = 1").bind(JSON.stringify({
+            api_key: "upstream-secret", base_url: "https://upstream.example",
+            model_mapping: { "deepseek-flash": "deepseek-v4.1-flash" }
+        })).run();
+        const payload = { model: "deepseek-flash", messages: [{ role: "user", content: "Hi" }], stream: sample.stream,
+            tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object" } } }] };
+        const data = JSON.stringify({ model: "deepseek-v4.1-flash", choices: [{ message: { content: "OK" } }],
+            usage: { prompt_tokens: 10, completion_tokens: 3, prompt_cache_hit_tokens: 4 } });
+        const wire = sample.stream ? ["data: " + data, "data: [DONE]", ""].join("\n\n") : data;
+        const originalFetch = globalThis.fetch;
+        let captured;
+        globalThis.fetch = async (_url, init) => {
+            captured = JSON.parse(await new Response(init.body).text());
+            return new Response(wire, { headers: { "content-type": sample.stream ? "text/event-stream" : "application/json" } });
+        };
+        t.after(() => { globalThis.fetch = originalFetch; });
+        const response = await routeRequest(new Request("https://edge.example/v1/chat/completions", {
+            method: "POST", headers: { authorization: "Bearer sk-gateway", "content-type": "application/json" },
+            body: JSON.stringify(payload)
+        }), { DB: db });
+        assert.equal(response.status, 200);
+        assert.equal(await response.text(), wire);
+        assert.deepEqual(captured, { ...payload, model: "deepseek-v4.1-flash" });
+        const rows = await db.prepare("SELECT * FROM usage_logs").all();
+        assert.equal(rows.results.length, 1);
+        const row = rows.results[0];
+        assert.equal(row.requested_model, "deepseek-flash");
+        assert.equal(row.upstream_model, "deepseek-v4.1-flash");
+        assert.deepEqual([row.input_tokens, row.output_tokens, row.cache_read_tokens], [6, 3, 4]);
+        const expected = (6 * 0.15e-6 + 3 * 0.6e-6 + 4 * 0.003e-6) * sample.factor;
+        assert.ok(Math.abs(row.actual_cost - expected) < 1e-12);
+        const key = await db.prepare("SELECT quota_used FROM api_keys WHERE id = 1").first();
+        const wallet = await db.prepare("SELECT balance FROM users WHERE id = ?").bind(row.user_id).first();
+        assert.equal(key.quota_used, row.actual_cost);
+        assert.ok(Math.abs((10 - wallet.balance) - expected) < 1e-10);
+    });
+}
+
+test("model mapping: failover does not carry the first account's mapped model", async (t) => {
+    const db = await fixture();
+    await db.prepare("UPDATE accounts SET credentials = ? WHERE id = 1").bind(JSON.stringify({
+        api_key: "upstream-secret", base_url: "https://upstream.example", model_mapping: { "gpt-4.1": "gpt-4o" }
+    })).run();
+    await db.prepare("INSERT INTO accounts (created_at, updated_at, name, notes, platform, type, credentials, extra, concurrency, priority, rate_multiplier, status, auto_pause_on_expired, schedulable, quota_dimension) VALUES (?, ?, 'backup', '', 'openai', 'apikey', ?, '{}', 3, 60, 1, 'active', 1, 1, 'global')")
+        .bind("2026-07-18T00:00:00.000Z", "2026-07-18T00:00:00.000Z", JSON.stringify({ api_key: "backup-secret", base_url: "https://backup.example" })).run();
+    const originalFetch = globalThis.fetch;
+    const models = [];
+    globalThis.fetch = async (_url, init) => {
+        models.push(JSON.parse(await new Response(init.body).text()).model);
+        return models.length === 1 ? new Response("unavailable", { status: 503 })
+            : new Response(JSON.stringify({ model: "gpt-4.1", usage: { prompt_tokens: 1, completion_tokens: 1 } }), { headers: { "content-type": "application/json" } });
+    };
+    t.after(() => { globalThis.fetch = originalFetch; });
+    const response = await routeRequest(new Request("https://edge.example/v1/chat/completions", {
+        method: "POST", headers: { authorization: "Bearer sk-gateway", "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-4.1", messages: [] })
+    }), { DB: db });
+    assert.equal(response.status, 200);
+    assert.deepEqual(models, ["gpt-4o", "gpt-4.1"]);
+    assert.equal(response.headers.get("x-sub2api-account-id"), "2");
+});
