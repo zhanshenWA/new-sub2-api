@@ -240,6 +240,8 @@ const PRICING_CATALOG: Record<string, Record<string, ModelPricingEntry>> = {
     },
     deepseek: {
         "deepseek-flash": tokenPrices(0.15, 0.6, 0.003),
+        // Compatible upstream name for DeepSeek-V4.1-Flash; same Flash tariff.
+        "deepseek-v4.1-flash": tokenPrices(0.15, 0.6, 0.003),
         "deepseek-v4-flash": tokenPrices(0.15, 0.6, 0.003),
         "deepseek-v4-flash-vision-exp": tokenPrices(0.15, 0.6, 0.003),
         "deepseek-v4-pro": tokenPrices(0.66, 1.98, 0.022),
