@@ -284,12 +284,22 @@ async function routeGatewayInternal(request: Request, env: GatewayEnv, event: Ga
             break;
         }
 
+        // Apply only this account's configured mapping; keep the original model for logs.
+        const mapping = creds.model_mapping;
+        const mapped = requestedModel && mapping && typeof mapping === "object" && !Array.isArray(mapping)
+            && Object.prototype.hasOwnProperty.call(mapping, requestedModel)
+            ? (mapping as Record<string, unknown>)[requestedModel] : undefined;
+        const mappedModel = typeof mapped === "string" && mapped.trim() ? mapped.trim() : requestedModel;
+        const upstreamBody = requestBody === undefined ? undefined
+            : mappedModel !== requestedModel
+                ? JSON.stringify({ ...parsedRequestJson, model: mappedModel })
+                : requestBody.slice(0);
         const startedAt = Date.now();
         try {
             const response = await fetch(upstream.url, {
                 method: request.method,
                 headers: upstream.headers,
-                body: requestBody === undefined ? undefined : requestBody.slice(0),
+                body: upstreamBody,
                 redirect: "manual"
             });
             event.upstreamStatus = response.ok ? undefined : response.status;
