@@ -6,6 +6,8 @@ import { GeminiWebService } from "../services/gemini-web.ts";
 import { DeepSeekWebService } from "../services/deepseek-web.ts";
 import { ChannelPricingCatalogService, type PricingContext } from "../services/channel-pricing-catalog.ts";
 
+import { gatewayLogContext, hasGatewayOutput, type GatewayLogContext } from "../services/gateway-log-context.ts";
+
 const pricingCatalog = new ChannelPricingCatalogService();
 
 function findModelPricing(model: string, context: PricingContext = {}): { inputPrice: number; outputPrice: number; cacheWritePrice: number; cacheReadPrice: number } | null {
@@ -90,6 +92,7 @@ const MAX_ROUTING_ATTEMPTS = 5;
 const DEFAULT_FAILURE_COOLDOWN_MS = 30_000;
 
 export async function routeGateway(request: Request, env: GatewayEnv): Promise<Response | null> {
+    const requestStartedAt = Date.now();
     const url = new URL(request.url);
     const family = classifyBackendRoute(url.pathname);
     if (family === null || !GATEWAY_FAMILIES.has(family)) return null;
@@ -134,6 +137,7 @@ export async function routeGateway(request: Request, env: GatewayEnv): Promise<R
     const parsedRequestJson = parseRequestBody(requestBody);
     const requestedModel = typeof parsedRequestJson.model === "string" ? parsedRequestJson.model : undefined;
     const isStreamRequest = parsedRequestJson.stream === true;
+    const logContext = gatewayLogContext(request, parsedRequestJson);
     const preferredPlatform = inferPlatform(url.pathname, requestedModel);
     if (requestedModel && !pricingCatalog.getModelPricing(requestedModel).found) {
         return openAIError(400, "model_pricing_unavailable", "No verified price is configured for this model");
@@ -182,6 +186,8 @@ export async function routeGateway(request: Request, env: GatewayEnv): Promise<R
                     model,
                     stream,
                     durationMs,
+                    startedAt: requestStartedAt,
+                    logContext,
                     subscription: validSub,
                     rateMultiplier,
                     serviceTier: typeof parsedRequestJson.service_tier === "string" ? parsedRequestJson.service_tier : undefined,
@@ -229,6 +235,8 @@ export async function routeGateway(request: Request, env: GatewayEnv): Promise<R
                     model,
                     stream,
                     durationMs,
+                    startedAt: requestStartedAt,
+                    logContext,
                     subscription: validSub,
                     rateMultiplier,
                     serviceTier: typeof parsedRequestJson.service_tier === "string" ? parsedRequestJson.service_tier : undefined,
@@ -284,6 +292,8 @@ export async function routeGateway(request: Request, env: GatewayEnv): Promise<R
                 model: requestedModel,
                 stream: isStreamRequest,
                 durationMs,
+                startedAt: requestStartedAt,
+                logContext: { ...logContext, upstreamEndpoint: upstream.url.pathname },
                 subscription: validSub,
                 rateMultiplier,
                 serviceTier: typeof parsedRequestJson.service_tier === "string" ? parsedRequestJson.service_tier : undefined,
@@ -979,6 +989,9 @@ async function finalizeGatewayResponse(
         rateMultiplier?: number;
         serviceTier?: string;
         cacheRetention?: string;
+        startedAt?: number;
+        logContext?: GatewayLogContext;
+        firstTokenMs?: number | null;
     }
 ): Promise<Response> {
     if (!response.ok) return response;
@@ -995,6 +1008,7 @@ async function finalizeGatewayResponse(
         let cacheReadTokens = 0;
         let upstreamModel = options.model || "unknown";
         let serviceTier = options.serviceTier;
+        let firstTokenMs: number | null = null;
 
         const processLine = (rawLine: string) => {
             const line = rawLine.trim();
@@ -1004,6 +1018,9 @@ async function finalizeGatewayResponse(
             try {
                 const data = JSON.parse(payload) as Record<string, unknown>;
                 if (!data || typeof data !== "object") return;
+                if (firstTokenMs === null && hasGatewayOutput(data) && options.startedAt !== undefined) {
+                    firstTokenMs = Math.max(0, Date.now() - options.startedAt);
+                }
                 const usage = readGatewayUsage(data);
                 upstreamModel = usage.model ?? upstreamModel;
                 serviceTier = usage.serviceTier ?? serviceTier;
@@ -1042,6 +1059,9 @@ async function finalizeGatewayResponse(
                     cacheReadTokens,
                     stream: true,
                     durationMs: options.durationMs,
+                    startedAt: options.startedAt,
+                    logContext: options.logContext,
+                    firstTokenMs,
                     forceLog: true,
                     subscription: options.subscription,
                     rateMultiplier: options.rateMultiplier,
@@ -1062,6 +1082,8 @@ async function finalizeGatewayResponse(
         model: options.model,
         stream: options.stream,
         durationMs: options.durationMs,
+        startedAt: options.startedAt,
+        logContext: options.logContext,
         response,
         forceLog: Boolean(options.stream),
         subscription: options.subscription,
@@ -1091,6 +1113,9 @@ async function markGatewaySuccess(
         rateMultiplier?: number;
         serviceTier?: string;
         cacheRetention?: string;
+        startedAt?: number;
+        logContext?: GatewayLogContext;
+        firstTokenMs?: number | null;
     }
 ): Promise<void> {
     const nowMs = Date.now();
@@ -1172,14 +1197,18 @@ async function markGatewaySuccess(
             request_id, model, requested_model, upstream_model,
             input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
             total_cost, actual_cost, rate_multiplier, billing_type,
-            stream, duration_ms, created_at, api_key_id, account_id, group_id, user_id, subscription_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+            stream, duration_ms, created_at, api_key_id, account_id, group_id, user_id, subscription_id,
+            reasoning_effort, ip_address, user_agent, inbound_endpoint, upstream_endpoint, first_token_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
             .bind(
                 crypto.randomUUID(), upstreamModel, options?.model ?? upstreamModel, upstreamModel,
                 inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens,
                 baseCost, costDelta, rateMultiplier, options?.subscription ? 1 : 0,
-                options?.stream ? 1 : 0, options?.durationMs ?? 0, now,
-                key.id, accountId, key.group_id, key.user_id, options?.subscription?.id ?? null
+                options?.stream ? 1 : 0, options?.startedAt === undefined ? (options?.durationMs ?? 0) : Math.max(0, Date.now() - options.startedAt), now,
+                key.id, accountId, key.group_id, key.user_id, options?.subscription?.id ?? null,
+                options?.logContext?.reasoningEffort ?? null, options?.logContext?.ipAddress ?? null,
+                options?.logContext?.userAgent ?? null, options?.logContext?.inboundEndpoint ?? null,
+                options?.logContext?.upstreamEndpoint ?? null, options?.firstTokenMs ?? null
             ));
     }
 
