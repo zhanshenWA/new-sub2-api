@@ -1,3 +1,4 @@
+import { normalizeUsageDate } from "../services/usage-dates.ts";
 import { D1AuthSessionRepository } from "../repositories/auth-sessions.ts";
 import { D1AuthUserRepository } from "../repositories/auth-users.ts";
 import { allRows, firstRow } from "../repositories/d1.ts";
@@ -51,7 +52,7 @@ function parseOptionalInt(url: URL, key: string): number | undefined {
 function parseDateParam(url: URL, key: string): string | undefined {
     const v = url.searchParams.get(key);
     if (v === null || v.trim() === "") return undefined;
-    return v.trim();
+    return normalizeUsageDate(v, key === "end_date", url.searchParams.get("timezone") ?? "UTC");
 }
 
 export function isUsageUserPath(path: string): boolean {
