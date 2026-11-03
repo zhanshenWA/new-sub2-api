@@ -434,47 +434,31 @@ export class D1DashboardRepositoryImpl implements D1DashboardRepository {
 
     async getUsageTrend(period: string, granularity: string, startDate?: string, endDate?: string): Promise<UsageTrendPoint[]> {
         const { start, end } = this.resolveDateRange(startDate, endDate, period);
-        const isHourly = granularity === "hour";
-
-        if (isHourly) {
-            const rows = await allRows<{
-                bucket_start: string; total_requests: number; input_tokens: number; output_tokens: number;
-                cache_creation_tokens: number; cache_read_tokens: number; total_cost: number; actual_cost: number;
-                total_duration_ms: number; active_users: number;
-            }>(this.#db, `SELECT * FROM usage_dashboard_hourly WHERE bucket_start >= ? AND bucket_start <= ? ORDER BY bucket_start`, [start, end]);
-            return rows.map((r) => ({
-                bucket: r.bucket_start,
-                requests: r.total_requests,
-                inputTokens: r.input_tokens,
-                outputTokens: r.output_tokens,
-                cacheCreationTokens: r.cache_creation_tokens,
-                cacheReadTokens: r.cache_read_tokens,
-                totalCost: r.total_cost,
-                actualCost: r.actual_cost,
-                avgLatencyMs: r.total_requests > 0 ? r.total_duration_ms / r.total_requests : 0,
-                errorRate: 0,
-                activeUsers: r.active_users,
-            }));
-        } else {
-            const rows = await allRows<{
-                bucket_date: string; total_requests: number; input_tokens: number; output_tokens: number;
-                cache_creation_tokens: number; cache_read_tokens: number; total_cost: number; actual_cost: number;
-                total_duration_ms: number; active_users: number;
-            }>(this.#db, `SELECT * FROM usage_dashboard_daily WHERE bucket_date >= ? AND bucket_date <= ? ORDER BY bucket_date`, [start.split("T")[0], end.split("T")[0]]);
-            return rows.map((r) => ({
-                bucket: r.bucket_date,
-                requests: r.total_requests,
-                inputTokens: r.input_tokens,
-                outputTokens: r.output_tokens,
-                cacheCreationTokens: r.cache_creation_tokens,
-                cacheReadTokens: r.cache_read_tokens,
-                totalCost: r.total_cost,
-                actualCost: r.actual_cost,
-                avgLatencyMs: r.total_requests > 0 ? r.total_duration_ms / r.total_requests : 0,
-                errorRate: 0,
-                activeUsers: r.active_users,
-            }));
-        }
+        const bucketFormat = granularity === "hour" ? "%Y-%m-%dT%H:00:00Z" : "%Y-%m-%d";
+        // The gateway writes usage_logs transactionally. Aggregate the source ledger
+        // directly so newly billed requests do not depend on a separate backfill job.
+        const rows = await allRows<{
+            bucket: string; requests: number; input_tokens: number; output_tokens: number;
+            cache_creation_tokens: number; cache_read_tokens: number; total_cost: number;
+            actual_cost: number; avg_latency_ms: number; active_users: number;
+        }>(this.#db,             `SELECT strftime(?, created_at) AS bucket, COUNT(*) AS requests,
+                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                    COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+                    COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                    COALESCE(SUM(total_cost), 0) AS total_cost,
+                    COALESCE(SUM(actual_cost), 0) AS actual_cost,
+                    COALESCE(AVG(duration_ms), 0) AS avg_latency_ms,
+                    COUNT(DISTINCT user_id) AS active_users
+             FROM usage_logs WHERE created_at >= ? AND created_at < ?
+             GROUP BY bucket ORDER BY bucket`, [bucketFormat, start, end]);
+        return rows.map((r) => ({
+            bucket: r.bucket, requests: r.requests,
+            inputTokens: r.input_tokens, outputTokens: r.output_tokens,
+            cacheCreationTokens: r.cache_creation_tokens, cacheReadTokens: r.cache_read_tokens,
+            totalCost: r.total_cost, actualCost: r.actual_cost,
+            avgLatencyMs: r.avg_latency_ms, errorRate: 0, activeUsers: r.active_users,
+        }));
     }
 
     async getModelStats(period: string, startDate?: string, endDate?: string): Promise<ModelStats[]> {
