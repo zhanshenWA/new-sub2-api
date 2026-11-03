@@ -3,6 +3,7 @@ import { D1AuthUserRepository } from "../repositories/auth-users.ts";
 import { runStatement } from "../repositories/d1.ts";
 import { AccessAuthError, AccessAuthService } from "../services/access-auth.ts";
 import { D1OpsRepositoryImpl } from "../repositories/ops.ts";
+import { D1OpsDashboard, opsWindow } from "../services/ops-dashboard.ts";
 import { D1OpsService, OpsError } from "../services/ops.ts";
 import { AuthTokenService } from "../services/auth-tokens.ts";
 import { Hs256JwtSigner, Hs256JwtVerifier } from "../services/jwt.ts";
@@ -146,6 +147,33 @@ export async function routeStagedOps(
 
         const repo = new D1OpsRepositoryImpl(env.DB);
         const svc = new D1OpsService(repo);
+
+        // Vue dashboard contracts, backed by raw usage/error ledgers on Cloudflare.
+        if (method === "GET") {
+            const dashboard = new D1OpsDashboard(env.DB);
+            const unavailable = { enabled: false, platform: {}, group: {}, account: {},
+                reason: "Cloudflare Workers 当前未启用全局在途并发与排队采集", timestamp: new Date().toISOString() };
+            const queries: Record<string, () => Promise<unknown>> = {
+                [OPS_PATHS.dashboardSnapshotV2]: () => dashboard.snapshot(url),
+                [OPS_PATHS.dashboardOverview]: () => dashboard.overview(opsWindow(url)),
+                [OPS_PATHS.dashboardThroughputTrend]: () => dashboard.throughput(opsWindow(url)),
+                [OPS_PATHS.dashboardLatencyHistogram]: () => dashboard.latency(opsWindow(url)),
+                [OPS_PATHS.dashboardErrorTrend]: () => dashboard.errorTrend(opsWindow(url)),
+                [OPS_PATHS.dashboardErrorDistribution]: () => dashboard.distribution(opsWindow(url)),
+                [OPS_PATHS.dashboardOpenAITokenStats]: () => dashboard.openaiTokens(url),
+                [OPS_PATHS.requests]: () => dashboard.requests(url),
+                [OPS_PATHS.systemLogs]: () => dashboard.systemLogs(url),
+                [OPS_PATHS.systemLogsHealth]: () => dashboard.logHealth(),
+                [OPS_PATHS.concurrency]: async () => unavailable,
+                [OPS_PATHS.userConcurrency]: async () => ({ ...unavailable, user: {} }),
+                [OPS_PATHS.accountAvailability]: async () => unavailable,
+                [OPS_PATHS.realtimeTraffic]: async () => {
+                    const w = opsWindow(url), data = await dashboard.overview(w);
+                    return { enabled: true, summary: { ...data, window: url.searchParams.get("window") ?? "1h" }, timestamp: new Date().toISOString() };
+                },
+            };
+            if (Object.hasOwn(queries, pathname)) return legacySuccess(await queries[pathname]());
+        }
 
         // Realtime ops signals
         if (pathname === OPS_PATHS.concurrency && method === "GET") {
