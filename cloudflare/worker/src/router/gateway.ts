@@ -984,6 +984,7 @@ async function finalizeGatewayResponse(
         const decoder = new TextDecoder();
         let buffer = "";
         let inputTokens = 0;
+        let totalInputTokens = 0;
         let outputTokens = 0;
         let cacheCreationTokens = 0;
         let cacheReadTokens = 0;
@@ -1001,10 +1002,11 @@ async function finalizeGatewayResponse(
                 const usage = readGatewayUsage(data);
                 upstreamModel = usage.model ?? upstreamModel;
                 serviceTier = usage.serviceTier ?? serviceTier;
-                inputTokens = Math.max(inputTokens, usage.inputTokens);
+                totalInputTokens = Math.max(totalInputTokens, usage.inputTokens + usage.cacheCreationTokens + usage.cacheReadTokens);
                 outputTokens = Math.max(outputTokens, usage.outputTokens);
                 cacheCreationTokens = Math.max(cacheCreationTokens, usage.cacheCreationTokens);
                 cacheReadTokens = Math.max(cacheReadTokens, usage.cacheReadTokens);
+                inputTokens = Math.max(0, totalInputTokens - cacheCreationTokens - cacheReadTokens);
             } catch {
                 // Ignore non-JSON SSE lines.
             }
