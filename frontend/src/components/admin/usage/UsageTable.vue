@@ -303,10 +303,7 @@
             <span class="font-semibold text-blue-400">{{ ((tokenTooltipData?.input_tokens || 0) + (tokenTooltipData?.output_tokens || 0) + (tokenTooltipData?.cache_creation_tokens || 0) + (tokenTooltipData?.cache_read_tokens || 0)).toLocaleString() }}</span>
           </div>
         </div>
-        <div
-          class="absolute top-1/2 h-0 w-0 -translate-y-1/2 border-b-[6px] border-t-[6px] border-b-transparent border-t-transparent"
-          :class="tooltipOnLeft ? 'left-full border-l-[6px] border-l-gray-900 dark:border-l-gray-800' : 'right-full border-r-[6px] border-r-gray-900 dark:border-r-gray-800'"
-        ></div>
+        <div class="absolute right-full top-1/2 h-0 w-0 -translate-y-1/2 border-b-[6px] border-r-[6px] border-t-[6px] border-b-transparent border-r-gray-900 border-t-transparent dark:border-r-gray-800"></div>
       </div>
     </div>
   </Teleport>
@@ -439,7 +436,10 @@
             </div>
           </template>
         </div>
-        <div class="absolute right-full top-1/2 h-0 w-0 -translate-y-1/2 border-b-[6px] border-r-[6px] border-t-[6px] border-b-transparent border-r-gray-900 border-t-transparent dark:border-r-gray-800"></div>
+        <div
+          class="absolute top-1/2 h-0 w-0 -translate-y-1/2 border-b-[6px] border-t-[6px] border-b-transparent border-t-transparent"
+          :class="tooltipOnLeft ? 'left-full border-l-[6px] border-l-gray-900 dark:border-l-gray-800' : 'right-full border-r-[6px] border-r-gray-900 dark:border-r-gray-800'"
+        ></div>
       </div>
     </div>
   </Teleport>
