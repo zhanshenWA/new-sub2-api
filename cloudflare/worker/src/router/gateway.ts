@@ -275,6 +275,11 @@ export async function routeGateway(request: Request, env: GatewayEnv): Promise<R
                 return withRoutingHeaders(response, account.id, attemptNumber, Date.now() - startedAt);
             }
             const durationMs = Date.now() - startedAt;
+            // Metadata reads (models, response retrieval, files) are not token-generating requests.
+            // Forward them without pricing or ledger writes, including their existing auth checks.
+            if (request.method === "GET" || request.method === "HEAD") {
+                return withRoutingHeaders(response, account.id, attemptNumber, durationMs);
+            }
             const finalized = await finalizeGatewayResponse(env.DB, key!, account.id, response, {
                 model: requestedModel,
                 stream: isStreamRequest,
