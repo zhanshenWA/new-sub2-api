@@ -39,8 +39,8 @@ export async function recordGatewayOpsError(db: D1Database, event: GatewayOpsEve
 export async function recordGatewayOpsSuccess(db: D1Database, event: GatewayOpsEvent): Promise<void> {
     try {
         await runStatement(db,`INSERT INTO ops_system_logs (created_at,level,component,message,request_id,user_id,api_key_id,account_id,platform,model,host,extra)
-            VALUES (?,'info','gateway','Gateway usage committed',?,?,?,?,?,?,'cloudflare-worker',?)`,[
-            new Date().toISOString(),event.requestId,event.userId??null,event.apiKeyId??null,event.accountId??null,event.platform??null,event.model??null,
+            VALUES (?,'info','gateway','Gateway usage committed',?,?,?,?,COALESCE(?,(SELECT platform FROM accounts WHERE id=?)),?,'cloudflare-worker',?)`,[
+            new Date().toISOString(),event.requestId,event.userId??null,event.apiKeyId??null,event.accountId??null,event.platform??null,event.accountId??null,event.model??null,
             JSON.stringify({duration_ms:Math.max(0,Date.now()-event.startedAt),stream:Boolean(event.stream)})
         ]);
     } catch { console.error('Gateway ops success event could not be persisted'); }
