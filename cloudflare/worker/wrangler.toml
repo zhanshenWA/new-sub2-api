@@ -1,6 +1,5 @@
 #:schema node_modules/wrangler/config-schema.json
 name = "sub2api-router"
-# account_id = "<your-cloudflare-account-id>"
 main = "src/index.ts"
 compatibility_date = "2026-07-15"
 workers_dev = true
@@ -10,31 +9,10 @@ crons = ["* * * * *"]
 
 [vars]
 EMAIL_TASK_BATCH_SIZE = "10"
-CORS_ALLOWED_ORIGINS = "*"  # 逗号分隔多个来源，或 "*" 允许所有
+CORS_ALLOWED_ORIGINS = "*"
 
-# Required secret. Configure it with:
-#   npx wrangler secret put EMAIL_TASK_ENCRYPTION_KEY
-#   npx wrangler secret put SMTP_PASSWORD
-#   npx wrangler secret put LINUXDO_CLIENT_SECRET
-#   npx wrangler secret put GEMINI_CODE_ASSIST_CLIENT_SECRET   # optional: Gemini Code Assist OAuth only
-# EMAIL_TASK_ENCRYPTION_KEY must be 64 hexadecimal characters and must match
-# the key used by authentication routes when they enqueue email tasks.
-# SMTP_PASSWORD overrides the transitional smtp_password D1 setting so the
-# production credential does not need to be stored as plaintext in D1.
-# LINUXDO_CLIENT_SECRET is used by the staged LinuxDo provider client after
-# the OAuth completion routes are jointly activated.
-
-# Temporary migration-only dependency. Remove this binding after every backend
-# route has a native Worker implementation.
-# [[services]]
-# binding = "BACKEND"
-# service = "sub2api-backend"
-# environment = "production"
-
-# Create the real D1 database before enabling this binding. Fake resource IDs
-# are intentionally not checked into the repository.
 [[d1_databases]]
 binding = "DB"
 database_name = "sub2api"
-database_id = "<your-d1-database-id>"
+database_id = "831450c4-1dc1-4900-b0dc-38a7ddf2876c"
 migrations_dir = "../d1/migrations"
