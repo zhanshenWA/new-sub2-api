@@ -613,41 +613,48 @@ for (const sample of [
 
 // Verify the compatible upstream model ID directly, without rewriting requests.
 for (const sample of [
-    { stream: false, hour: 12, factor: 1 },
-    { stream: true, hour: 12, factor: 1 },
-    { stream: false, hour: 2, factor: 2 }
+    { stream: false, hour: 12, factor: 1, path: "/v1/chat/completions", base: "" },
+    { stream: true, hour: 12, factor: 1, path: "/chat/completions", base: "" },
+    { stream: false, hour: 2, factor: 2, path: "/chat/completions", base: "/v1" },
+    { stream: true, hour: 12, factor: 1, path: "/v1/chat/completions", base: "/v1" }
 ]) {
     test("billing detail: direct Yituo V4.1 Flash routes and bills " + JSON.stringify(sample), async (t) => {
         t.mock.method(Date, "now", () => Date.UTC(2026, 10, 3, sample.hour));
         const db = await fixture();
         await db.prepare("UPDATE accounts SET platform = 'deepseek', credentials = ? WHERE id = 1").bind(JSON.stringify({
-            api_key: "upstream-secret", base_url: "https://upstream.example",
+            api_key: "upstream-secret", base_url: "https://upstream.example" + sample.base,
             model_mapping: { "deepseek-v4.1-flash": "deepseek-v4.1-flash" }
         })).run();
         const payload = { model: "deepseek-v4.1-flash", messages: [{ role: "user", content: "Hi" }], stream: sample.stream,
             tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object" } } }] };
-        const data = JSON.stringify({ model: "deepseek-v4.1-flash", choices: [{ message: { content: "OK" } }],
+        const data = JSON.stringify({ model: "deepseek-v4.1-flash", choices: sample.stream ? [{ index: 0, delta: { content: "OK" }, finish_reason: "stop" }]
+                : [{ index: 0, message: { role: "assistant", content: "OK" }, finish_reason: "stop" }],
             usage: { prompt_tokens: 10, completion_tokens: 3, prompt_cache_hit_tokens: 4 } });
         const wire = sample.stream ? ["data: " + data, "data: [DONE]", ""].join("\n\n") : data;
         const originalFetch = globalThis.fetch;
         let captured;
+        let capturedUrl;
         globalThis.fetch = async (_url, init) => {
+            capturedUrl = String(_url);
             captured = JSON.parse(await new Response(init.body).text());
             return new Response(wire, { headers: { "content-type": sample.stream ? "text/event-stream" : "application/json" } });
         };
         t.after(() => { globalThis.fetch = originalFetch; });
-        const response = await routeRequest(new Request("https://edge.example/v1/chat/completions", {
+        const response = await routeRequest(new Request("https://edge.example" + sample.path, {
             method: "POST", headers: { authorization: "Bearer sk-gateway", "content-type": "application/json" },
             body: JSON.stringify(payload)
         }), { DB: db });
         assert.equal(response.status, 200);
         assert.equal(await response.text(), wire);
         assert.deepEqual(captured, payload);
+        assert.equal(capturedUrl, "https://upstream.example/v1/chat/completions");
         const rows = await db.prepare("SELECT * FROM usage_logs").all();
         assert.equal(rows.results.length, 1);
         const row = rows.results[0];
         assert.equal(row.requested_model, "deepseek-v4.1-flash");
         assert.equal(row.upstream_model, "deepseek-v4.1-flash");
+        assert.equal(row.inbound_endpoint, sample.path);
+        assert.equal(row.upstream_endpoint, "/v1/chat/completions");
         assert.deepEqual([row.input_tokens, row.output_tokens, row.cache_read_tokens], [6, 3, 4]);
         const expected = (6 * 0.15e-6 + 3 * 0.6e-6 + 4 * 0.003e-6) * sample.factor;
         assert.ok(Math.abs(row.actual_cost - expected) < 1e-12);
@@ -657,4 +664,3 @@ for (const sample of [
         assert.ok(Math.abs((10 - wallet.balance) - expected) < 1e-10);
     });
 }
-
