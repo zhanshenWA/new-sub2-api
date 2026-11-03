@@ -52,9 +52,12 @@ test('ops dashboard: final upstream error counted once in SLA trend and distribu
  await d.prepare(`INSERT INTO ops_error_logs(request_id,created_at,error_phase,error_type,status_code,upstream_status_code,platform,group_id) VALUES('e','2026-11-03T00:30:00.000Z','request','upstream',502,429,'openai',2)`).run();
  const svc=new D1OpsDashboard(d),data=await svc.snapshot(url());
  assert.equal(data.overview.request_count_total,4);assert.equal(data.overview.error_count_total,1);
- assert.equal(data.overview.sla,75);assert.equal(data.overview.upstream_429_count,1);
+ assert.equal(data.overview.sla,0.75);assert.equal(data.overview.error_rate,0.25);assert.equal(data.overview.upstream_429_count,1);
  assert.equal(data.error_trend.points.reduce((n,p)=>n+p.error_count_total,0),1);
- assert.deepEqual(await svc.distribution(opsWindow(url())),{total:1,items:[{status_code:502,total:1,sla:1,business_limited:0}]});
+ const distribution=await svc.distribution(opsWindow(url()));
+ assert.equal(distribution.total,1);assert.deepEqual(distribution.items.map(row=>({...row})),[{status_code:502,total:1,sla:1,business_limited:0}]);
+ const list=await svc.errors(url('&platform=openai&group_id=2'),'upstream');assert.equal(list.total,1);assert.equal(list.items[0].message,null);
+ const detail=await svc.errorDetail(list.items[0].id);assert.equal(detail.phase,'request');assert.equal(detail.account_name,'');
 });
 
 test('ops dashboard: request drilldown paginates successes and honors duration filters',async()=>{
