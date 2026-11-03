@@ -171,7 +171,7 @@ async function routeGatewayInternal(request: Request, env: GatewayEnv, event: Ga
         Object.assign(event, { accountId: account.id, platform: account.platform, upstreamStatus: undefined });
         const creds = parseObject(account.credentials);
         const attemptNumber = attempt + 1;
-        const rateMultiplier = (validSub?.group_rate_multiplier ?? key!.group_rate_multiplier ?? account.rate_multiplier ?? 1) || 1;
+        const rateMultiplier = (validSub?.group_rate_multiplier ?? key!.group_rate_multiplier ?? account.rate_multiplier ?? 1);
 
         if (account.platform.toLowerCase() === "gemini" && (creds.auth_type === "gemini_web" || creds.secure_1psid)) {
             let proxyUrl = "";
@@ -1176,10 +1176,11 @@ async function markGatewaySuccess(
         serviceTier, cacheRetention: options?.cacheRetention, timeMs: nowMs
     });
     if (pricing === null) throw new GatewayBillingError("No verified price is configured for upstream model or service tier");
-    const baseCost = inputTokens * pricing.inputPrice +
-          outputTokens * pricing.outputPrice +
-          cacheCreationTokens * pricing.cacheWritePrice +
-          cacheReadTokens * pricing.cacheReadPrice;
+    const inputCost = inputTokens * pricing.inputPrice;
+    const outputCost = outputTokens * pricing.outputPrice;
+    const cacheCreationCost = cacheCreationTokens * pricing.cacheWritePrice;
+    const cacheReadCost = cacheReadTokens * pricing.cacheReadPrice;
+    const baseCost = inputCost + outputCost + cacheCreationCost + cacheReadCost;
     const rateMultiplier = options?.rateMultiplier ?? 1;
     const costDelta = baseCost * rateMultiplier;
 
@@ -1220,8 +1221,9 @@ async function markGatewaySuccess(
             input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
             total_cost, actual_cost, rate_multiplier, billing_type,
             stream, duration_ms, created_at, api_key_id, account_id, group_id, user_id, subscription_id,
-            reasoning_effort, ip_address, user_agent, inbound_endpoint, upstream_endpoint, first_token_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+            reasoning_effort, ip_address, user_agent, inbound_endpoint, upstream_endpoint, first_token_ms,
+            input_cost, output_cost, cache_creation_cost, cache_read_cost, billing_mode, billing_tier
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
             .bind(
                 usageRequestId, upstreamModel, options?.model ?? upstreamModel, upstreamModel,
                 inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens,
@@ -1230,7 +1232,8 @@ async function markGatewaySuccess(
                 key.id, accountId, key.group_id, key.user_id, options?.subscription?.id ?? null,
                 options?.logContext?.reasoningEffort ?? null, options?.logContext?.ipAddress ?? null,
                 options?.logContext?.userAgent ?? null, options?.logContext?.inboundEndpoint ?? null,
-                options?.logContext?.upstreamEndpoint ?? null, options?.firstTokenMs ?? null
+                options?.logContext?.upstreamEndpoint ?? null, options?.firstTokenMs ?? null,
+                inputCost, outputCost, cacheCreationCost, cacheReadCost, "token", serviceTier ?? "default"
             ));
     }
 
