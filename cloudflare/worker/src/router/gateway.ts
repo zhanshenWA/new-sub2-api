@@ -6,6 +6,8 @@ import { GeminiWebService } from "../services/gemini-web.ts";
 import { DeepSeekWebService } from "../services/deepseek-web.ts";
 import { ChannelPricingCatalogService, type PricingContext } from "../services/channel-pricing-catalog.ts";
 
+import { recordGatewayOpsError, recordGatewayOpsSuccess, type GatewayOpsEvent } from "../services/gateway-ops.ts";
+
 import { gatewayLogContext, hasGatewayOutput, type GatewayLogContext } from "../services/gateway-log-context.ts";
 
 const pricingCatalog = new ChannelPricingCatalogService();
@@ -92,6 +94,18 @@ const MAX_ROUTING_ATTEMPTS = 5;
 const DEFAULT_FAILURE_COOLDOWN_MS = 30_000;
 
 export async function routeGateway(request: Request, env: GatewayEnv): Promise<Response | null> {
+    const event: GatewayOpsEvent = { requestId: crypto.randomUUID(), startedAt: Date.now(), requestPath: new URL(request.url).pathname };
+    try {
+        const response = await routeGatewayInternal(request, env, event);
+        if (response && response.status >= 400 && env.DB) await recordGatewayOpsError(env.DB, event, response.status);
+        return response;
+    } catch (error) {
+        if (env.DB && GATEWAY_FAMILIES.has(classifyBackendRoute(event.requestPath ?? '') ?? '')) await recordGatewayOpsError(env.DB, event, 500);
+        throw error;
+    }
+}
+
+async function routeGatewayInternal(request: Request, env: GatewayEnv, event: GatewayOpsEvent): Promise<Response | null> {
     const requestStartedAt = Date.now();
     const url = new URL(request.url);
     const family = classifyBackendRoute(url.pathname);
@@ -116,6 +130,8 @@ export async function routeGateway(request: Request, env: GatewayEnv): Promise<R
         LIMIT 1
     `, [rawKey]);
 
+    if (key) Object.assign(event, { userId: key.user_id, apiKeyId: key.id, groupId: key.group_id });
+
     if (url.pathname === "/v1/usage" && request.method === "GET") {
         if (key === null) return openAIError(401, "invalid_api_key", "Invalid API key");
         return handleKeyUsage(env.DB, key, url);
@@ -139,6 +155,7 @@ export async function routeGateway(request: Request, env: GatewayEnv): Promise<R
     const isStreamRequest = parsedRequestJson.stream === true;
     const logContext = gatewayLogContext(request, parsedRequestJson);
     const preferredPlatform = inferPlatform(url.pathname, requestedModel);
+    Object.assign(event, { model: requestedModel?.slice(0, 200), stream: isStreamRequest, platform: preferredPlatform });
     if (requestedModel && !pricingCatalog.getModelPricing(requestedModel).found) {
         return openAIError(400, "model_pricing_unavailable", "No verified price is configured for this model");
     }
@@ -151,6 +168,7 @@ export async function routeGateway(request: Request, env: GatewayEnv): Promise<R
 
     for (let attempt = 0; attempt < accounts.length; attempt += 1) {
         const account = accounts[attempt];
+        Object.assign(event, { accountId: account.id, platform: account.platform, upstreamStatus: undefined });
         const creds = parseObject(account.credentials);
         const attemptNumber = attempt + 1;
         const rateMultiplier = (validSub?.group_rate_multiplier ?? key!.group_rate_multiplier ?? account.rate_multiplier ?? 1) || 1;
@@ -171,6 +189,7 @@ export async function routeGateway(request: Request, env: GatewayEnv): Promise<R
             const startedAt = Date.now();
             try {
                 const resp = await GeminiWebService.executeChatCompletion(prompt, model, creds as any, stream, proxyUrl);
+                event.upstreamStatus = resp.ok ? undefined : resp.status;
                 if (isRetryableStatus(resp.status)) {
                     const message = `Gemini Web upstream returned HTTP ${resp.status}`;
                     await markAccountFailure(env.DB, account.id, message, retryAfterMs(resp.headers));
@@ -220,6 +239,7 @@ export async function routeGateway(request: Request, env: GatewayEnv): Promise<R
             const startedAt = Date.now();
             try {
                 const resp = await DeepSeekWebService.executeChatCompletion(prompt, model, creds as any, stream, proxyUrl);
+                event.upstreamStatus = resp.ok ? undefined : resp.status;
                 if (isRetryableStatus(resp.status)) {
                     const message = `DeepSeek Web upstream returned HTTP ${resp.status}`;
                     await markAccountFailure(env.DB, account.id, message, retryAfterMs(resp.headers));
@@ -272,6 +292,7 @@ export async function routeGateway(request: Request, env: GatewayEnv): Promise<R
                 body: requestBody === undefined ? undefined : requestBody.slice(0),
                 redirect: "manual"
             });
+            event.upstreamStatus = response.ok ? undefined : response.status;
             if (isRetryableStatus(response.status)) {
                 const message = `Upstream returned HTTP ${response.status}`;
                 await markAccountFailure(env.DB, account.id, message, retryAfterMs(response.headers));
@@ -1192,6 +1213,7 @@ async function markGatewaySuccess(
             .bind(costDelta, now, key.user_id));
     }
 
+    const usageRequestId = crypto.randomUUID();
     if (hasUsage || inputTokens > 0 || outputTokens > 0 || options?.forceLog) {
         statements.push(db.prepare(`INSERT INTO usage_logs (
             request_id, model, requested_model, upstream_model,
@@ -1201,7 +1223,7 @@ async function markGatewaySuccess(
             reasoning_effort, ip_address, user_agent, inbound_endpoint, upstream_endpoint, first_token_ms
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
             .bind(
-                crypto.randomUUID(), upstreamModel, options?.model ?? upstreamModel, upstreamModel,
+                usageRequestId, upstreamModel, options?.model ?? upstreamModel, upstreamModel,
                 inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens,
                 baseCost, costDelta, rateMultiplier, options?.subscription ? 1 : 0,
                 options?.stream ? 1 : 0, options?.startedAt === undefined ? (options?.durationMs ?? 0) : Math.max(0, Date.now() - options.startedAt), now,
@@ -1218,6 +1240,11 @@ async function markGatewaySuccess(
     } catch (error) {
         console.error("Gateway billing transaction failed", error);
         throw new GatewayBillingError("Unable to record gateway usage");
+    }
+    if (hasUsage || inputTokens > 0 || outputTokens > 0 || options?.forceLog) {
+        await recordGatewayOpsSuccess(db, { requestId: usageRequestId, startedAt: options?.startedAt ?? nowMs,
+            userId: key.user_id, apiKeyId: key.id, groupId: key.group_id, accountId,
+            model: options?.model ?? upstreamModel, stream: options?.stream });
     }
 }
 
