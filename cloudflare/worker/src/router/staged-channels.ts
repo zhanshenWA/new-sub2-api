@@ -5,6 +5,7 @@ import { AuthTokenService } from "../services/auth-tokens.ts";
 import { D1ChannelService, ChannelError } from "../services/channels.ts";
 import { ChannelPricingCatalogService } from "../services/channel-pricing-catalog.ts";
 import { Hs256JwtSigner, Hs256JwtVerifier } from "../services/jwt.ts";
+import type { ChannelModelPricingRecord, ChannelWithRelationsRecord } from "../repositories/channels.ts";
 import type { D1Database } from "../types/d1.ts";
 import {
     legacyError,
@@ -58,6 +59,42 @@ function mapAccountStatsRulesInput(raw: unknown): unknown {
         }
         return out;
     });
+}
+
+function pricingOutput(pricing: ChannelModelPricingRecord) {
+    return {
+        id: pricing.id, channel_id: pricing.channelId, platform: pricing.platform,
+        models: pricing.models, billing_mode: pricing.billingMode,
+        input_price: pricing.inputPrice, output_price: pricing.outputPrice,
+        cache_write_price: pricing.cacheWritePrice, cache_read_price: pricing.cacheReadPrice,
+        image_output_price: pricing.imageOutputPrice, per_request_price: pricing.perRequestPrice,
+        intervals: pricing.intervals.map((interval) => ({
+            id: interval.id, pricing_id: interval.pricingId,
+            min_tokens: interval.minTokens, max_tokens: interval.maxTokens,
+            tier_label: interval.tierLabel, input_price: interval.inputPrice,
+            output_price: interval.outputPrice, cache_write_price: interval.cacheWritePrice,
+            cache_read_price: interval.cacheReadPrice, per_request_price: interval.perRequestPrice,
+            sort_order: interval.sortOrder,
+        })),
+    };
+}
+
+// The admin API uses snake_case; preserve user-defined JSON mapping keys verbatim.
+function channelOutput(channel: ChannelWithRelationsRecord) {
+    return {
+        id: channel.id, name: channel.name, description: channel.description, status: channel.status,
+        group_ids: channel.groupIds, model_pricing: channel.modelPricing.map(pricingOutput),
+        model_mapping: channel.modelMapping, billing_model_source: channel.billingModelSource,
+        restrict_models: channel.restrictModels, features: channel.features,
+        features_config: channel.featuresConfig,
+        apply_pricing_to_account_stats: channel.applyPricingToAccountStats,
+        account_stats_pricing_rules: channel.accountStatsPricingRules.map((rule) => ({
+            id: rule.id, channel_id: rule.channelId, name: rule.name,
+            group_ids: rule.groupIds, account_ids: rule.accountIds, sort_order: rule.sortOrder,
+            pricing: rule.pricing.map(pricingOutput),
+        })),
+        created_at: channel.createdAt, updated_at: channel.updatedAt,
+    };
 }
 
 export interface StagedChannelsEnv {
@@ -177,7 +214,7 @@ export async function routeStagedChannels(
             const sortBy = parseQueryString(url, "sort_by") ?? "created_at";
             const sortOrder = parseQueryString(url, "sort_order") ?? "desc";
             const result = await service.list({ page, pageSize, status, search, sortBy, sortOrder });
-            return legacySuccess({ items: result.items, total: result.total, page, page_size: pageSize });
+            return legacySuccess({ items: result.items.map(channelOutput), total: result.total, page, page_size: pageSize });
         }
 
         // POST /api/v1/admin/channels — create
@@ -199,14 +236,14 @@ export async function routeStagedChannels(
                 applyPricingToAccountStats: body.apply_pricing_to_account_stats as boolean | undefined,
                 accountStatsPricingRules: mapAccountStatsRulesInput(body.account_stats_pricing_rules) as any,
             });
-            return legacySuccess(created);
+            return legacySuccess(channelOutput(created));
         }
 
         // GET /api/v1/admin/channels/:id
         if (idMatch !== null && request.method === "GET") {
             const id = Number(idMatch[1]);
             const channel = await service.getById(id);
-            return legacySuccess(channel);
+            return legacySuccess(channelOutput(channel));
         }
 
         // PUT /api/v1/admin/channels/:id
@@ -230,7 +267,7 @@ export async function routeStagedChannels(
                 applyPricingToAccountStats: body.apply_pricing_to_account_stats as boolean | null | undefined,
                 accountStatsPricingRules: mapAccountStatsRulesInput(body.account_stats_pricing_rules) as any,
             });
-            return legacySuccess(updated);
+            return legacySuccess(channelOutput(updated));
         }
 
         // DELETE /api/v1/admin/channels/:id
