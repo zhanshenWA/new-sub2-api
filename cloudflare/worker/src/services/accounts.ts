@@ -546,6 +546,16 @@ export class D1AccountService {
     async getUsage(accountId: number): Promise<AccountUsageInfo> {
         const existing = await this.repo.getById(accountId);
         if (!existing) throw errNotFound();
+        if (existing.platform === "openai" && existing.type === "oauth") {
+            return {
+                source: "passive",
+                updated_at: null,
+                five_hour: null,
+                seven_day: null,
+                seven_day_sonnet: null,
+                error: "尚未获取真实订阅额度：当前 CF 版本未实现 OpenAI OAuth 额度查询，请在 ChatGPT/Codex 官方页面查看。"
+            };
+        }
         const zeroUsage: TodayStats = { requests: 0, tokens: 0, cost: 0, actual_cost: 0, user_cost: 0 };
         const now = new Date().toISOString();
         return {
