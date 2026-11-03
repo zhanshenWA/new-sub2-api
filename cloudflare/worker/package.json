@@ -12,7 +12,8 @@
         "test": "node --experimental-strip-types --test",
         "typecheck": "tsc --noEmit",
         "check:wrangler": "wrangler deploy --dry-run --outdir .wrangler/dry-run",
-        "check": "npm run typecheck && npm test && npm run check:wrangler"
+        "check": "npm run typecheck && npm test && npm run check:wrangler",
+        "test:usage-metadata": "node --experimental-strip-types --test --test-name-pattern=\"usage metadata:\" test/gateway.test.mjs"
     },
     "dependencies": {
         "bcryptjs": "3.0.3"
