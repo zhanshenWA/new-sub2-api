@@ -9,7 +9,7 @@ crons = ["* * * * *"]
 
 [vars]
 EMAIL_TASK_BATCH_SIZE = "10"
-CORS_ALLOWED_ORIGINS = "https://sub2api-frontend.zhanshenwa.workers.dev"
+CORS_ALLOWED_ORIGINS = "https://api.hxzz.uno"
 
 [[d1_databases]]
 binding = "DB"
