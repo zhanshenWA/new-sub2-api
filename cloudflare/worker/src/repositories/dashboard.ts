@@ -99,6 +99,8 @@ export interface ModelStats {
 }
 
 export interface GroupStats {
+    totalTokens: number;
+    actualCost: number;
     groupId: number;
     groupName: string;
     requests: number;
@@ -502,16 +504,18 @@ export class D1DashboardRepositoryImpl implements D1DashboardRepository {
         const { start, end } = this.resolveDateRange(startDate, endDate, period);
         const rows = await allRows<{
             group_id: number; group_name: string; total_requests: number; total_cost: number;
-            active_users: number; active_api_keys: number;
+            active_users: number; active_api_keys: number; total_tokens: number; actual_cost: number;
         }>(this.#db,
             `SELECT g.id as group_id, g.name as group_name,
                     COUNT(ul.id) as total_requests,
                     SUM(ul.total_cost) as total_cost,
+                    COALESCE(SUM(ul.actual_cost), 0) as actual_cost,
+                    COALESCE(SUM(ul.input_tokens + ul.output_tokens + ul.cache_creation_tokens + ul.cache_read_tokens), 0) as total_tokens,
                     COUNT(DISTINCT ul.user_id) as active_users,
                     COUNT(DISTINCT ul.api_key_id) as active_api_keys
              FROM usage_logs ul
              JOIN groups g ON ul.group_id = g.id
-             WHERE ul.created_at >= ? AND ul.created_at <= ?
+             WHERE ul.created_at >= ? AND ul.created_at < ?
              GROUP BY g.id, g.name
              ORDER BY total_requests DESC`,
             [start, end]
@@ -521,6 +525,8 @@ export class D1DashboardRepositoryImpl implements D1DashboardRepository {
             groupName: r.group_name,
             requests: r.total_requests,
             cost: r.total_cost ?? 0,
+            actualCost: r.actual_cost ?? 0,
+            totalTokens: r.total_tokens ?? 0,
             activeUsers: r.active_users,
             activeAPIKeys: r.active_api_keys,
         }));
