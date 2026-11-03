@@ -1,4 +1,4 @@
-import type { GroupRecord, RateEntryRecord, GroupApiKeyBrief } from "../repositories/groups.ts";
+import type { GroupRecord, RateEntryRecord, GroupApiKeyBrief, GroupAccountCounts } from "../repositories/groups.ts";
 import { D1GroupRepository, buildGroupInsertValues } from "../repositories/groups.ts";
 import type { D1Database, D1Value } from "../types/d1.ts";
 
@@ -150,7 +150,7 @@ export class D1GroupService {
         this.repo = dbOrRepo instanceof D1GroupRepository ? dbOrRepo : new D1GroupRepository(dbOrRepo);
     }
 
-    private toGroupJson(g: GroupRecord): Record<string, unknown> {
+    private toGroupJson(g: GroupRecord, counts?: GroupAccountCounts): Record<string, unknown> {
         return {
             id: g.id,
             name: g.name,
@@ -198,13 +198,19 @@ export class D1GroupService {
             messages_dispatch_model_config: safeJsonParse(g.messagesDispatchModelConfig, {}),
             models_list_config: safeJsonParse(g.modelsListConfig, {}),
             rpm_limit: g.rpmLimit,
-            account_count: 0,
-            active_account_count: 0,
-            rate_limited_account_count: 0,
+            account_count: counts?.total ?? 0,
+            active_account_count: counts?.active ?? 0,
+            rate_limited_account_count: counts?.rateLimited ?? 0,
             account_groups: [],
             created_at: g.createdAt,
             updated_at: g.updatedAt
         };
+    }
+
+    private async toGroupsJson(groups: GroupRecord[]): Promise<Record<string, unknown>[]> {
+        const counts = await this.repo.getAccountCounts(groups.map(group => group.id));
+        const byId = new Map(counts.map(count => [count.groupId, count]));
+        return groups.map(group => this.toGroupJson(group, byId.get(group.id)));
     }
 
     async list(params: {
@@ -212,33 +218,33 @@ export class D1GroupService {
         search?: string; isExclusive?: boolean; sortBy?: string; sortOrder?: string
     }): Promise<{ items: Record<string, unknown>[]; total: number }> {
         const result = await this.repo.list(params);
-        return { items: result.items.map(g => this.toGroupJson(g)), total: result.total };
+        return { items: await this.toGroupsJson(result.items), total: result.total };
     }
 
     async listAll(): Promise<Record<string, unknown>[]> {
         const groups = await this.repo.listAll();
-        return groups.map(g => this.toGroupJson(g));
+        return this.toGroupsJson(groups);
     }
 
     async listActive(): Promise<Record<string, unknown>[]> {
         const groups = await this.repo.listActive();
-        return groups.map(g => this.toGroupJson(g));
+        return this.toGroupsJson(groups);
     }
 
     async listActiveByPlatform(platform: string): Promise<Record<string, unknown>[]> {
         const groups = await this.repo.listActiveByPlatform(platform);
-        return groups.map(g => this.toGroupJson(g));
+        return this.toGroupsJson(groups);
     }
 
     async listAllIncludingInactive(): Promise<Record<string, unknown>[]> {
         const groups = await this.repo.listAll();
-        return groups.map(g => this.toGroupJson(g));
+        return this.toGroupsJson(groups);
     }
 
     async getById(id: number): Promise<Record<string, unknown>> {
         const g = await this.repo.getById(id);
         if (!g) throw errNotFound();
-        return this.toGroupJson(g);
+        return (await this.toGroupsJson([g]))[0]!;
     }
 
     async create(input: CreateGroupInput): Promise<Record<string, unknown>> {
@@ -307,7 +313,7 @@ export class D1GroupService {
         if (Array.isArray(input.copy_accounts_from_group_ids) && input.copy_accounts_from_group_ids.length > 0) {
             await this.repo.copyAccountsFromGroups(g.id, input.copy_accounts_from_group_ids);
         }
-        return this.toGroupJson(g);
+        return (await this.toGroupsJson([g]))[0]!;
     }
 
     async update(id: number, input: UpdateGroupInput): Promise<Record<string, unknown>> {
@@ -372,7 +378,7 @@ export class D1GroupService {
             await this.repo.copyAccountsFromGroups(id, input.copy_accounts_from_group_ids);
         }
 
-        if (Object.keys(updates).length === 0) return this.toGroupJson(existing);
+        if (Object.keys(updates).length === 0) return (await this.toGroupsJson([existing]))[0]!;
 
         if (updates["name"] !== undefined && typeof updates["name"] === "string") {
             const newName = (updates["name"] as string).trim();
@@ -385,7 +391,7 @@ export class D1GroupService {
 
         const updated = await this.repo.update(id, updates);
         if (!updated) throw errNotFound();
-        return this.toGroupJson(updated);
+        return (await this.toGroupsJson([updated]))[0]!;
     }
 
     async delete(id: number): Promise<void> {
@@ -404,10 +410,11 @@ export class D1GroupService {
     async getGroupStats(groupId: number): Promise<GroupStats> {
         const existing = await this.repo.getById(groupId);
         if (!existing) throw errNotFound();
+        const [counts] = await this.repo.getAccountCounts([groupId]);
         return {
-            totalAccounts: 0,
-            activeAccounts: 0,
-            rateLimitedAccounts: 0,
+            totalAccounts: counts?.total ?? 0,
+            activeAccounts: counts?.active ?? 0,
+            rateLimitedAccounts: counts?.rateLimited ?? 0,
             todayUsageTokens: 0,
             todayCostUsd: 0,
             activeUsersCount: 0,
