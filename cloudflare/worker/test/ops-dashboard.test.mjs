@@ -72,7 +72,11 @@ test('ops dashboard: sanitized events appear in system logs without touching bal
  const d=fixture(),event={requestId:'new-event',startedAt:Date.now()-100,userId:1,apiKeyId:1,groupId:1,accountId:1,platform:'deepseek',model:'deepseek-chat',requestPath:'/v1/chat/completions'};
  await recordGatewayOpsError(d,event,503);
  await recordGatewayOpsSuccess(d,{...event,requestId:'success-event',platform:undefined});
- const svc=new D1OpsDashboard(d),data=await svc.systemLogs(new URL('https://x/?time_range=1h&platform=deepseek&page_size=1'));
+ assert.equal((await d.prepare('SELECT COUNT(*) AS n FROM ops_system_logs').first()).n,2);
+ const logUrl=new URL('https://x/?time_range=1h&platform=deepseek&page_size=1');
+ // End is exclusive; allow a deterministic margin for same-millisecond writes.
+ logUrl.searchParams.set('end_time',new Date(Date.now()+5000).toISOString());
+ const svc=new D1OpsDashboard(d),data=await svc.systemLogs(logUrl);
  assert.equal(data.total,2);assert.equal(data.items.length,1);assert.equal(typeof data.items[0].extra,'object');
  assert.equal((await svc.logHealth()).written_count,2);assert.equal((await svc.logHealth()).dropped_count,null);
  assert.equal((await d.prepare('SELECT balance FROM users WHERE id=1').first()).balance,10);
