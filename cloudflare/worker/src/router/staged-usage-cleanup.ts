@@ -1,3 +1,4 @@
+import { withUsageMetadata } from "../services/usage-log-metadata.ts";
 import { normalizeUsageDate } from "../services/usage-dates.ts";
 import { D1AuthSessionRepository } from "../repositories/auth-sessions.ts";
 import { D1AuthUserRepository } from "../repositories/auth-users.ts";
@@ -132,7 +133,7 @@ export async function routeStagedUsageCleanup(
                 group_id: row.group_id, subscription_id: row.subscription_id, api_key_id: row.api_key_id,
                 account_id: row.account_id, created_at: row.created_at,
             }));
-            return legacySuccess({ items, total: count?.total ?? 0, page, page_size: pageSize });
+            return legacySuccess({ items: await withUsageMetadata(env.DB, items, { admin: true }), total: count?.total ?? 0, page, page_size: pageSize });
         }
 
         if (STATS_RE.test(pathname) && method === "GET") {
