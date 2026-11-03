@@ -3,12 +3,15 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { routeRequest } from "../src/index.ts";
+import { gatewayLogContext, hasGatewayOutput } from "../src/services/gateway-log-context.ts";
+import { withUsageMetadata } from "../src/services/usage-log-metadata.ts";
 import { SQLiteD1Database } from "./sqlite-d1.mjs";
 
 const migrations = await Promise.all([
     "0001_ent_core.sql",
     "0004_runtime_state.sql",
-    "0005_auth_sessions.sql"
+    "0005_auth_sessions.sql",
+    "0007_usage_reasoning_effort.sql"
 ].map((name) => readFile(new URL(`../../d1/migrations/${name}`, import.meta.url), "utf8")));
 
 async function fixture() {
@@ -401,4 +404,138 @@ test("gateway enforces exclusive group access in querySchedulableAccounts", asyn
     assert.equal(res2.status, 200);
 });
 
+async function metadataGroup(db) {
+    const now = new Date().toISOString();
+    const result = await db.prepare(
+        "INSERT INTO groups (created_at, updated_at, name, platform, supported_model_scopes, messages_dispatch_model_config, models_list_config) VALUES (?, ?, 'Metadata group', 'openai', '[]', '{}', '{}')"
+    ).bind(now, now).run();
+    const groupId = Number(result.meta.last_row_id);
+    await db.prepare("UPDATE api_keys SET group_id = ? WHERE id = 1").bind(groupId).run();
+    await db.prepare("INSERT INTO account_groups (created_at, account_id, group_id) VALUES (?, 1, ?)").bind(now, groupId).run();
+    return groupId;
+}
 
+test("usage metadata: accepts both effort formats and trusts only Cloudflare client IP", () => {
+    const request = new Request("https://edge.example/responses?secret=not-logged", {
+        headers: { "cf-connecting-ip": "192.0.2.1", "x-forwarded-for": "203.0.113.9", "user-agent": "metadata-test" }
+    });
+    const nested = gatewayLogContext(request, { reasoning: { effort: "high" } });
+    assert.equal(nested.reasoningEffort, "high");
+    assert.equal(nested.ipAddress, "192.0.2.1");
+    assert.equal(nested.inboundEndpoint, "/responses");
+    assert.equal(nested.userAgent, "metadata-test");
+    assert.equal(gatewayLogContext(request, { reasoning_effort: "low" }).reasoningEffort, "low");
+    assert.equal(gatewayLogContext(request, {}).reasoningEffort, null);
+    assert.equal(gatewayLogContext(new Request("https://edge.example/v1/responses", {
+        headers: { "x-forwarded-for": "203.0.113.9" }
+    }), {}).ipAddress, null);
+});
+
+test("usage metadata: first output detection ignores role heartbeat and usage", () => {
+    assert.equal(hasGatewayOutput({ choices: [{ delta: { role: "assistant", content: "" } }] }), false);
+    assert.equal(hasGatewayOutput({ type: "ping" }), false);
+    assert.equal(hasGatewayOutput({ usage: { output_tokens: 1 } }), false);
+    assert.equal(hasGatewayOutput({ type: "response.created" }), false);
+    assert.equal(hasGatewayOutput({ choices: [{ delta: { content: "Hello" } }] }), true);
+    assert.equal(hasGatewayOutput({ choices: [{ delta: { reasoning_content: "Think" } }] }), true);
+    assert.equal(hasGatewayOutput({ type: "response.output_text.delta", delta: "Hi" }), true);
+    assert.equal(hasGatewayOutput({ type: "response.function_call_arguments.delta", delta: "{}" }), true);
+    assert.equal(hasGatewayOutput({ type: "content_block_delta", delta: { thinking: "Think" } }), true);
+    assert.equal(hasGatewayOutput({ candidates: [{ content: { parts: [{ text: "Hi" }] } }] }), true);
+});
+
+test("usage metadata: JSON logging restores names and enforces the user scope", async (t) => {
+    const db = await fixture();
+    const groupId = await metadataGroup(db);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({
+        model: "gpt-4.1", usage: { input_tokens: 100, output_tokens: 50 }
+    }), { headers: { "content-type": "application/json" } });
+    t.after(() => { globalThis.fetch = originalFetch; });
+    const response = await routeRequest(new Request("https://edge.example/responses?secret=not-logged", {
+        method: "POST",
+        headers: { authorization: "Bearer sk-gateway", "content-type": "application/json", "cf-connecting-ip": "192.0.2.1", "user-agent": "metadata-test" },
+        body: JSON.stringify({ model: "gpt-4.1", reasoning: { effort: "high" }, input: "Hi" })
+    }), { DB: db });
+    assert.equal(response.status, 200);
+    const row = await db.prepare("SELECT * FROM usage_logs").first();
+    assert.equal(row.reasoning_effort, "high");
+    assert.equal(row.ip_address, "192.0.2.1");
+    assert.equal(row.user_agent, "metadata-test");
+    assert.equal(row.inbound_endpoint, "/responses");
+    assert.equal(row.upstream_endpoint, "/v1/responses");
+    assert.equal(row.first_token_ms, null);
+    assert.equal(row.group_id, groupId);
+    const [admin] = await withUsageMetadata(db, [row], { admin: true });
+    assert.equal(admin.api_key.name, "Gateway");
+    assert.equal(admin.account.name, "openai-main");
+    assert.equal(admin.group.name, "Metadata group");
+    assert.equal(admin.user.email, "gateway@example.com");
+    const [user] = await withUsageMetadata(db, [{ id: row.id }], { userId: row.user_id });
+    assert.equal(user.group.name, "Metadata group");
+    assert.equal(user.api_key.name, "Gateway");
+    assert.equal(user.account, undefined);
+    assert.equal(user.user, undefined);
+    assert.equal(JSON.stringify(user).includes("sk-gateway"), false);
+    assert.equal(JSON.stringify(admin).includes("upstream-secret"), false);
+    assert.deepEqual(await withUsageMetadata(db, [{ id: row.id }], { userId: row.user_id + 1 }), []);
+    const total = await db.prepare("SELECT COUNT(*) AS n FROM usage_logs").first();
+    assert.equal(total.n, 1);
+    const key = await db.prepare("SELECT quota_used FROM api_keys WHERE id = 1").first();
+    const balance = await db.prepare("SELECT balance FROM users WHERE id = ?").bind(row.user_id).first();
+    assert.ok(row.actual_cost > 0);
+    assert.equal(key.quota_used, row.actual_cost);
+    assert.ok(Math.abs((10 - balance.balance) - row.actual_cost) < 1e-10);
+});
+
+test("usage metadata: SSE stays byte-identical and charges exactly one ledger entry", async (t) => {
+    const db = await fixture();
+    const originalFetch = globalThis.fetch;
+    const wire = [
+        'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n',
+        'data: {"model":"gpt-4.1","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50}}\n\n',
+        'data: [DONE]\n\n'
+    ].join("").replaceAll("\\n", "\n");
+    globalThis.fetch = async () => new Response(wire, { headers: { "content-type": "text/event-stream" } });
+    t.after(() => { globalThis.fetch = originalFetch; });
+    const response = await routeRequest(new Request("https://edge.example/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer sk-gateway", "content-type": "application/json", "cf-connecting-ip": "192.0.2.2" },
+        body: JSON.stringify({ model: "gpt-4.1", stream: true, reasoning_effort: "low", messages: [] })
+    }), { DB: db });
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), wire);
+    const row = await db.prepare("SELECT * FROM usage_logs").first();
+    assert.equal(row.reasoning_effort, "low");
+    assert.equal(row.ip_address, "192.0.2.2");
+    assert.equal(row.inbound_endpoint, "/v1/chat/completions");
+    assert.equal(row.upstream_endpoint, "/v1/chat/completions");
+    assert.equal(typeof row.first_token_ms, "number");
+    assert.ok(row.first_token_ms >= 0 && row.duration_ms >= row.first_token_ms);
+    assert.equal(row.input_tokens, 100);
+    assert.equal(row.output_tokens, 50);
+    const total = await db.prepare("SELECT COUNT(*) AS n FROM usage_logs").first();
+    assert.equal(total.n, 1);
+    const key = await db.prepare("SELECT quota_used FROM api_keys WHERE id = 1").first();
+    assert.equal(key.quota_used, row.actual_cost);
+});
+
+test("usage metadata: usage-only streams keep first token time and unspecified metadata null", async (t) => {
+    const db = await fixture();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response('data: {"model":"gpt-4.1","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":0}}\n\ndata: [DONE]\n\n'.replaceAll("\\n", "\n"), {
+        headers: { "content-type": "text/event-stream" }
+    });
+    t.after(() => { globalThis.fetch = originalFetch; });
+    const response = await routeRequest(new Request("https://edge.example/v1/chat/completions", {
+        method: "POST", headers: { authorization: "Bearer sk-gateway", "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-4.1", stream: true, messages: [] })
+    }), { DB: db });
+    assert.equal(response.status, 200);
+    await response.text();
+    const row = await db.prepare("SELECT first_token_ms, reasoning_effort, ip_address FROM usage_logs").first();
+    assert.equal(row.first_token_ms, null);
+    assert.equal(row.reasoning_effort, null);
+    assert.equal(row.ip_address, null);
+});
