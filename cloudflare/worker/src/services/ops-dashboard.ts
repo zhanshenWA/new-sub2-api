@@ -126,6 +126,31 @@ export class D1OpsDashboard {
         ]);
         return {items,total:total?.n??0,page,page_size,pages:Math.ceil((total?.n??0)/page_size)};
     }
+    async errors(url: URL, phase?: string) {
+        const w=opsWindow(url),p=url.searchParams,args:D1Value[]=[w.start_time,w.end_time];
+        const conditions=['julianday(e.created_at)>=julianday(?)','julianday(e.created_at)<julianday(?)'];
+        for(const key of ['platform','group_id','account_id','user_id','api_key_id','error_owner','error_source']) if(p.get(key)){conditions.push('e.'+key+'=?');args.push(p.get(key)!);}
+        if(phase==='upstream') conditions.push("(e.error_phase='upstream' OR COALESCE(e.upstream_status_code,0)>0)");
+        else if(phase==='request') conditions.push("e.error_phase!='upstream'");
+        if(p.get('phase')){conditions.push('e.error_phase=?');args.push(p.get('phase')!);}
+        if(p.get('model')){conditions.push('COALESCE(e.requested_model,e.model)=?');args.push(p.get('model')!);}
+        if(p.get('resolved')==='true'||p.get('resolved')==='false'){conditions.push('e.resolved=?');args.push(p.get('resolved')==='true'?1:0);}
+        if(p.get('view')==='errors')conditions.push('e.is_business_limited=0');
+        if(p.get('view')==='excluded')conditions.push('e.is_business_limited=1');
+        if(p.get('status_codes')){const codes=p.get('status_codes')!.split(',').map(Number).filter(n=>Number.isInteger(n)&&n>=100&&n<=599).slice(0,20);if(codes.length){conditions.push('e.status_code IN ('+codes.map(()=>'?').join(',')+')');args.push(...codes);}}
+        if(p.get('q')){conditions.push('(e.error_message LIKE ? OR e.request_id LIKE ?)');args.push('%'+p.get('q')+'%','%'+p.get('q')+'%');}
+        const where=' WHERE '+conditions.join(' AND '),page=intParam(url,'page',1,100000),page_size=intParam(url,'page_size',20,100);
+        const order=({model:'e.model',status_code:'e.status_code',created_at:'julianday(e.created_at)'} as Record<string,string>)[p.get('sort_by')??'created_at']??'julianday(e.created_at)';
+        const [total,items]=await Promise.all([
+            firstRow<{n:number}>(this.db,'SELECT COUNT(*) AS n FROM ops_error_logs e'+where,args),
+            allRows(this.db,this.errorSelect()+where+' ORDER BY '+order+(p.get('sort_order')==='asc'?' ASC':' DESC')+',e.id DESC LIMIT ? OFFSET ?',[...args,page_size,(page-1)*page_size])
+        ]);
+        return {items,total:total?.n??0,page,page_size,pages:Math.ceil((total?.n??0)/page_size)};
+    }
+    private errorSelect() {
+        return "SELECT e.*,e.error_phase AS phase,e.error_type AS type,e.error_message AS message,COALESCE(u.email,'') AS user_email,COALESCE(k.name,'') AS api_key_name,COALESCE(a.name,'') AS account_name,COALESCE(g.name,'') AS group_name FROM ops_error_logs e LEFT JOIN users u ON u.id=e.user_id LEFT JOIN api_keys k ON k.id=e.api_key_id LEFT JOIN accounts a ON a.id=e.account_id LEFT JOIN groups g ON g.id=e.group_id";
+    }
+    async errorDetail(id: number) { return firstRow(this.db,this.errorSelect()+' WHERE e.id=?',[id]); }
     async systemLogs(url: URL) {
         const w=opsWindow(url),p=url.searchParams;const conditions=['julianday(created_at)>=julianday(?)','julianday(created_at)<julianday(?)'];const args:D1Value[]=[w.start_time,w.end_time];
         for(const key of ['host','level','component','request_id','client_request_id','user_id','api_key_id','account_id','platform','model']) if(p.get(key)){conditions.push(key+'=?');args.push(p.get(key)!);}
