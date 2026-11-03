@@ -3,6 +3,7 @@ import { D1AccountRepository } from "../repositories/accounts.ts";
 import { D1ProxyRepository } from "../repositories/proxies.ts";
 import { D1AdminOAuthService, AdminOAuthError } from "./admin-oauth.ts";
 import type { D1Database, D1Value } from "../types/d1.ts";
+import { allRows } from "../repositories/d1.ts";
 
 export class AccountError extends Error {
     status: number;
@@ -96,6 +97,14 @@ export type UpdateAccountInput = Partial<{
     proxyFallbackOriginId: number | null;
     schedulable: boolean;
 }>;
+
+interface AssignedAccountGroup {
+    id: number;
+    name: string;
+    platform: string;
+    subscription_type: string;
+    rate_multiplier: number;
+}
 
 export interface AccountStats {
     total_requests: number;
@@ -224,7 +233,28 @@ export class D1AccountService {
         return value;
     }
 
-    private toAccountJson(a: AccountRecord): Record<string, unknown> {
+    private async getGroupsByAccount(accountIds: number[]): Promise<Map<number, AssignedAccountGroup[]>> {
+        const groupsByAccount = new Map<number, AssignedAccountGroup[]>();
+        for (let offset = 0; offset < accountIds.length; offset += 80) {
+            const batch = accountIds.slice(offset, offset + 80);
+            const rows = await allRows<AssignedAccountGroup & { account_id: number }>(this.db, `
+                SELECT ag.account_id, g.id, g.name, g.platform, g.subscription_type, g.rate_multiplier
+                FROM account_groups ag
+                JOIN groups g ON g.id = ag.group_id AND g.deleted_at IS NULL
+                WHERE ag.account_id IN (${batch.map(() => '?').join(', ')})
+                ORDER BY ag.priority ASC, g.sort_order ASC, g.id ASC
+            `, batch);
+            for (const { account_id, ...group } of rows) {
+                const groups = groupsByAccount.get(account_id) ?? [];
+                groups.push(group);
+                groupsByAccount.set(account_id, groups);
+            }
+        }
+        return groupsByAccount;
+    }
+
+    private async toAccountJson(a: AccountRecord, assignedGroups?: AssignedAccountGroup[]): Promise<Record<string, unknown>> {
+        const groups = assignedGroups ?? (await this.getGroupsByAccount([a.id])).get(a.id) ?? [];
         return {
             id: a.id,
             name: a.name,
@@ -255,6 +285,8 @@ export class D1AccountService {
             quota_dimension: a.quotaDimension,
             proxy_id: a.proxyId,
             parent_account_id: a.parentAccountId,
+            group_ids: groups.map(group => group.id),
+            groups,
             created_at: a.createdAt,
             updated_at: a.updatedAt
         };
@@ -266,12 +298,14 @@ export class D1AccountService {
         sortBy?: string; sortOrder?: string
     }): Promise<{ items: Record<string, unknown>[]; total: number }> {
         const result = await this.repo.list(params);
-        return { items: result.items.map(a => this.toAccountJson(a)), total: result.total };
+        const groupsByAccount = await this.getGroupsByAccount(result.items.map(account => account.id));
+        return { items: await Promise.all(result.items.map(account => this.toAccountJson(account, groupsByAccount.get(account.id) ?? []))), total: result.total };
     }
 
     async listAll(): Promise<Record<string, unknown>[]> {
         const accounts = await this.repo.listAll();
-        return accounts.map(a => this.toAccountJson(a));
+        const groupsByAccount = await this.getGroupsByAccount(accounts.map(account => account.id));
+        return Promise.all(accounts.map(account => this.toAccountJson(account, groupsByAccount.get(account.id) ?? [])));
     }
 
     async getById(id: number): Promise<Record<string, unknown>> {
