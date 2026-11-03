@@ -539,3 +539,74 @@ test("usage metadata: usage-only streams keep first token time and unspecified m
     assert.equal(row.reasoning_effort, null);
     assert.equal(row.ip_address, null);
 });
+
+// Billing regression: verify the wallet, counters, persisted components and both DTO scopes.
+for (const sample of [
+    { name: "JSON cached input and group multiplier", model: "gpt-4.1", platform: "openai", rate: 0.6,
+      usage: { prompt_tokens: 1000, completion_tokens: 200, prompt_tokens_details: { cached_tokens: 400 } },
+      tokens: [600, 200, 0, 400], prices: [2e-6, 8e-6, 2e-6, 0.5e-6] },
+    { name: "SSE repeated usage is billed once", model: "gpt-4.1", platform: "openai", rate: 0.6, stream: true,
+      usage: { input_tokens: 1000, output_tokens: 200, input_tokens_details: { cached_tokens: 400 } },
+      tokens: [600, 200, 0, 400], prices: [2e-6, 8e-6, 2e-6, 0.5e-6] },
+    { name: "priority and cache writes use effective prices", model: "gpt-6.1-sol", platform: "openai", rate: 1.5, tier: "priority",
+      usage: { input_tokens: 1000, output_tokens: 100, input_tokens_details: { cached_tokens: 400, cache_write_tokens: 200 } },
+      tokens: [400, 100, 200, 400], prices: [4e-6, 20e-6, 5e-6, 0.2e-6] },
+    { name: "Anthropic exclusive cache counts", model: "claude-sonnet-4", platform: "anthropic", rate: 0.6,
+      usage: { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 200, cache_read_input_tokens: 1000 },
+      tokens: [100, 50, 200, 1000], prices: [3e-6, 15e-6, 3.75e-6, 0.3e-6] },
+    { name: "DeepSeek cache hits at off peak", model: "deepseek-flash", platform: "deepseek", rate: 0.8, timeMs: Date.UTC(2026, 10, 3, 12),
+      usage: { prompt_tokens: 8638, completion_tokens: 79, prompt_cache_hit_tokens: 8400, prompt_cache_miss_tokens: 238 },
+      tokens: [238, 79, 0, 8400], prices: [0.15e-6, 0.6e-6, 0.15e-6, 0.003e-6] },
+    { name: "DeepSeek peak snapshots", model: "deepseek-flash", platform: "deepseek", rate: 0.8, timeMs: Date.UTC(2026, 10, 3, 2),
+      usage: { prompt_tokens: 8638, completion_tokens: 79, prompt_cache_hit_tokens: 8400 },
+      tokens: [238, 79, 0, 8400], prices: [0.3e-6, 1.2e-6, 0.3e-6, 0.006e-6] },
+    { name: "zero group multiplier stays free", model: "gpt-4.1", platform: "openai", rate: 0,
+      usage: { prompt_tokens: 1000, completion_tokens: 200 },
+      tokens: [1000, 200, 0, 0], prices: [2e-6, 8e-6, 2e-6, 0.5e-6] },
+    { name: "zero output remains an explicit zero cost", model: "gpt-4.1", platform: "openai", rate: 1,
+      usage: { prompt_tokens: 1000, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 1000 } },
+      tokens: [0, 0, 0, 1000], prices: [2e-6, 8e-6, 2e-6, 0.5e-6] }
+]) {
+    test("billing detail: " + sample.name, async (t) => {
+        if (sample.timeMs) t.mock.method(Date, "now", () => sample.timeMs);
+        const db = await fixture();
+        const groupId = await metadataGroup(db);
+        await db.prepare("UPDATE groups SET rate_multiplier = ?, platform = ? WHERE id = ?").bind(sample.rate, sample.platform, groupId).run();
+        await db.prepare("UPDATE accounts SET platform = ? WHERE id = 1").bind(sample.platform).run();
+        const data = JSON.stringify({ model: sample.model, service_tier: sample.tier ?? "default", usage: sample.usage });
+        const wire = sample.stream ? ["data: " + data, "data: " + data, "data: [DONE]", ""].join("\n\n") : data;
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = async () => new Response(wire, { headers: { "content-type": sample.stream ? "text/event-stream" : "application/json" } });
+        t.after(() => { globalThis.fetch = originalFetch; });
+        const endpoint = sample.platform === "anthropic" ? "/v1/messages" : "/v1/chat/completions";
+        const response = await routeRequest(new Request("https://edge.example" + endpoint, {
+            method: "POST", headers: { authorization: "Bearer sk-gateway", "content-type": "application/json" },
+            body: JSON.stringify({ model: sample.model, messages: [], stream: Boolean(sample.stream) })
+        }), { DB: db });
+        assert.equal(response.status, 200);
+        assert.equal(await response.text(), wire);
+        const rows = await db.prepare("SELECT * FROM usage_logs").all();
+        assert.equal(rows.results.length, 1);
+        const row = rows.results[0];
+        assert.deepEqual([row.input_tokens, row.output_tokens, row.cache_creation_tokens, row.cache_read_tokens], sample.tokens);
+        const expectedCosts = sample.tokens.map((tokens, i) => tokens * sample.prices[i]);
+        const components = [row.input_cost, row.output_cost, row.cache_creation_cost, row.cache_read_cost];
+        components.forEach((cost, i) => assert.ok(Math.abs(cost - expectedCosts[i]) < 1e-12));
+        const base = expectedCosts.reduce((a, b) => a + b, 0);
+        assert.ok(Math.abs(row.total_cost - base) < 1e-12);
+        assert.equal(row.rate_multiplier, sample.rate);
+        assert.ok(Math.abs(row.actual_cost - base * sample.rate) < 1e-12);
+        assert.equal(row.billing_mode, "token");
+        assert.equal(row.billing_tier, sample.tier ?? "default");
+        const wallet = await db.prepare("SELECT balance FROM users WHERE id = ?").bind(row.user_id).first();
+        const key = await db.prepare("SELECT quota_used, usage_5h, usage_1d, usage_7d FROM api_keys WHERE id = 1").first();
+        assert.ok(Math.abs((10 - wallet.balance) - row.actual_cost) < 1e-10);
+        for (const counter of Object.values(key)) assert.equal(counter, row.actual_cost);
+        for (const scope of [{ admin: true }, { userId: row.user_id }]) {
+            const [dto] = await withUsageMetadata(db, [{ id: row.id }], scope);
+            assert.deepEqual([dto.input_cost, dto.output_cost, dto.cache_creation_cost, dto.cache_read_cost], components);
+            assert.equal(dto.rate_multiplier, sample.rate);
+            assert.equal(dto.service_tier, row.billing_tier);
+        }
+    });
+}
