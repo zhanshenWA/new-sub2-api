@@ -43,7 +43,8 @@ test("admin ops", async (t) => {
         const r = await routeRequest(new Request(`${BASE}${P}/concurrency`, { headers: { authorization: `Bearer ${tk}` } }), env(d));
         const j = await r.json();
         assert.equal(r.status, 200);
-        assert.equal(typeof j.data.total_concurrency, "number");
+        assert.equal(j.data.enabled, false);
+        assert.deepEqual(j.data.platform, {});
     });
 
     await t.test("GET /ops/user-concurrency returns list", async () => {
@@ -51,7 +52,7 @@ test("admin ops", async (t) => {
         const r = await routeRequest(new Request(`${BASE}${P}/user-concurrency`, { headers: { authorization: `Bearer ${tk}` } }), env(d));
         const j = await r.json();
         assert.equal(r.status, 200);
-        assert.ok(Array.isArray(j.data));
+        assert.deepEqual(j.data.user, {});
     });
 
     await t.test("GET /ops/account-availability returns list", async () => {
@@ -59,7 +60,7 @@ test("admin ops", async (t) => {
         const r = await routeRequest(new Request(`${BASE}${P}/account-availability`, { headers: { authorization: `Bearer ${tk}` } }), env(d));
         const j = await r.json();
         assert.equal(r.status, 200);
-        assert.ok(Array.isArray(j.data));
+        assert.equal(j.data.enabled, false);
     });
 
     await t.test("GET /ops/realtime-traffic returns summary", async () => {
@@ -67,7 +68,7 @@ test("admin ops", async (t) => {
         const r = await routeRequest(new Request(`${BASE}${P}/realtime-traffic`, { headers: { authorization: `Bearer ${tk}` } }), env(d));
         const j = await r.json();
         assert.equal(r.status, 200);
-        assert.equal(typeof j.data.qps, "number");
+        assert.equal(typeof j.data.summary.qps.current, "number");
     });
 
     await t.test("GET /ops/alert-rules returns list", async () => {
@@ -158,7 +159,7 @@ test("admin ops", async (t) => {
         const r = await routeRequest(new Request(`${BASE}${P}/errors`, { headers: { authorization: `Bearer ${tk}` } }), env(d));
         const j = await r.json();
         assert.equal(r.status, 200);
-        assert.ok(Array.isArray(j.data));
+        assert.ok(Array.isArray(j.data.items));
     });
 
     await t.test("GET /ops/request-errors returns list", async () => {
@@ -166,7 +167,7 @@ test("admin ops", async (t) => {
         const r = await routeRequest(new Request(`${BASE}${P}/request-errors`, { headers: { authorization: `Bearer ${tk}` } }), env(d));
         const j = await r.json();
         assert.equal(r.status, 200);
-        assert.ok(Array.isArray(j.data));
+        assert.ok(Array.isArray(j.data.items));
     });
 
     await t.test("GET /ops/upstream-errors returns list", async () => {
@@ -174,7 +175,7 @@ test("admin ops", async (t) => {
         const r = await routeRequest(new Request(`${BASE}${P}/upstream-errors`, { headers: { authorization: `Bearer ${tk}` } }), env(d));
         const j = await r.json();
         assert.equal(r.status, 200);
-        assert.ok(Array.isArray(j.data));
+        assert.ok(Array.isArray(j.data.items));
     });
 
     await t.test("GET /ops/requests returns list", async () => {
@@ -182,7 +183,7 @@ test("admin ops", async (t) => {
         const r = await routeRequest(new Request(`${BASE}${P}/requests`, { headers: { authorization: `Bearer ${tk}` } }), env(d));
         const j = await r.json();
         assert.equal(r.status, 200);
-        assert.ok(Array.isArray(j.data));
+        assert.ok(Array.isArray(j.data.items));
     });
 
     await t.test("GET /ops/system-logs returns list", async () => {
@@ -190,7 +191,7 @@ test("admin ops", async (t) => {
         const r = await routeRequest(new Request(`${BASE}${P}/system-logs`, { headers: { authorization: `Bearer ${tk}` } }), env(d));
         const j = await r.json();
         assert.equal(r.status, 200);
-        assert.ok(Array.isArray(j.data));
+        assert.ok(Array.isArray(j.data.items));
     });
 
     await t.test("POST /ops/system-logs/cleanup returns result", async () => {
@@ -209,7 +210,7 @@ test("admin ops", async (t) => {
         const r = await routeRequest(new Request(`${BASE}${P}/system-logs/health`, { headers: { authorization: `Bearer ${tk}` } }), env(d));
         const j = await r.json();
         assert.equal(r.status, 200);
-        assert.equal(typeof j.data.total_logs, "number");
+        assert.equal(typeof j.data.written_count, "number");
     });
 
     await t.test("GET /ops/dashboard/snapshot-v2 returns snapshot", async () => {
