@@ -388,7 +388,7 @@ watch(
       v-if="!realtimeEnabled"
       class="flex flex-1 items-center justify-center rounded-xl border border-dashed border-gray-200 text-sm text-gray-500 dark:border-dark-700 dark:text-gray-400"
     >
-      {{ t('admin.ops.concurrency.disabledHint') }}
+      Cloudflare Workers 当前未启用全局在途并发与排队采集；已完成请求可在吞吐趋势中查看。
     </div>
 
     <!-- 数据展示区域 -->
