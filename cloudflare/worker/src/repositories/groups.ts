@@ -53,6 +53,13 @@ export interface GroupRecord {
     deletedAt: string | null;
 }
 
+export interface GroupAccountCounts {
+    groupId: number;
+    total: number;
+    active: number;
+    rateLimited: number;
+}
+
 export interface GroupApiKeyBrief {
     id: number;
     key: string;
@@ -347,6 +354,31 @@ export class D1GroupRepository {
     async listAll(): Promise<GroupRecord[]> {
         const rows = await allRows<GroupRow>(this.db, `SELECT * FROM groups WHERE deleted_at IS NULL ORDER BY sort_order ASC`);
         return rows.map(rowToRecord);
+    }
+
+    async getAccountCounts(groupIds: number[]): Promise<GroupAccountCounts[]> {
+        const ids = [...new Set(groupIds)].filter(id => Number.isInteger(id) && id > 0);
+        const counts: GroupAccountCounts[] = [];
+        for (let offset = 0; offset < ids.length; offset += 80) {
+            const batch = ids.slice(offset, offset + 80);
+            const rows = await allRows<{ group_id: number; total: number; active: number; rate_limited: number }>(this.db, `
+                SELECT ag.group_id,
+                       COUNT(DISTINCT a.id) AS total,
+                       COUNT(DISTINCT CASE WHEN a.status = 'active' AND a.schedulable = 1
+                           AND (a.auto_pause_on_expired = 0 OR a.expires_at IS NULL OR julianday(a.expires_at) > julianday('now'))
+                           AND (a.rate_limit_reset_at IS NULL OR julianday(a.rate_limit_reset_at) <= julianday('now'))
+                           AND (a.overload_until IS NULL OR julianday(a.overload_until) <= julianday('now'))
+                           AND (a.temp_unschedulable_until IS NULL OR julianday(a.temp_unschedulable_until) <= julianday('now'))
+                           THEN a.id END) AS active,
+                       COUNT(DISTINCT CASE WHEN julianday(a.rate_limit_reset_at) > julianday('now') THEN a.id END) AS rate_limited
+                FROM account_groups ag
+                JOIN accounts a ON a.id = ag.account_id AND a.deleted_at IS NULL
+                WHERE ag.group_id IN (${batch.map(() => '?').join(', ')})
+                GROUP BY ag.group_id
+            `, batch);
+            counts.push(...rows.map(row => ({ groupId: row.group_id, total: row.total, active: row.active, rateLimited: row.rate_limited })));
+        }
+        return counts;
     }
 
     async updateSortOrders(updates: Array<{ id: number; sortOrder: number }>): Promise<void> {
