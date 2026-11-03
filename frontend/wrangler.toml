@@ -1,5 +1,4 @@
 name = "sub2api-frontend"
-# account_id = "<your-cloudflare-account-id>"
 main = "src/worker.ts"
 compatibility_date = "2026-07-15"
 send_metrics = false
@@ -11,7 +10,7 @@ not_found_handling = "single-page-application"
 run_worker_first = true
 
 [vars]
-BACKEND_URL = "https://sub2api-router.<your-subdomain>.workers.dev"
+BACKEND_URL = "https://sub2api-router.zhanshenwa.workers.dev"
 
 [[services]]
 binding = "ROUTER"
