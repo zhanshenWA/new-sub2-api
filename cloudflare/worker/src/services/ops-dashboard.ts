@@ -74,8 +74,8 @@ export class D1OpsDashboard {
         const currentSeconds=Math.min(60,seconds);
         return {...publicWindow(w),system_metrics:null,job_heartbeats:null,success_count:success,...errors,
             request_count_total:total,request_count_sla:slaTotal,token_consumed:tokens,
-            sla:slaTotal?success/slaTotal*100:100,error_rate:total?errors.error_count_total/total*100:0,
-            upstream_error_rate:total?(errors.upstream_error_count_excl_429_529+errors.upstream_429_count+errors.upstream_529_count)/total*100:0,
+            sla:slaTotal?success/slaTotal:1,error_rate:total?errors.error_count_total/total:0,
+            upstream_error_rate:total?(errors.upstream_error_count_excl_429_529+errors.upstream_429_count+errors.upstream_529_count)/total:0,
             qps:{current:Number(current?.requests??0)/currentSeconds,peak:Math.max(0,...trend.points.map(p=>p.qps)),avg:total/seconds},
             tps:{current:Number(current?.tokens??0)/currentSeconds,peak:Math.max(0,...trend.points.map(p=>p.tps)),avg:tokens/seconds},duration,ttft};
     }
