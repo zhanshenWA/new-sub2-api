@@ -452,7 +452,12 @@ const startTest = async () => {
 
     const contentType = response.headers.get('content-type') || ''
     if (contentType.includes('application/json')) {
-      const payload = await response.json() as { data?: { success?: boolean; message?: string; latency_ms?: number }; message?: string }
+      const payload = await response.json() as {
+        data?: { success?: boolean; message?: string; latency_ms?: number }
+        success?: boolean
+        message?: string
+        latency_ms?: number
+      }
       const result = payload.data ?? payload
       const message = result.message || payload.message || (result.success ? 'Account connectivity test succeeded' : 'Account connectivity test failed')
       if (result.success) {
