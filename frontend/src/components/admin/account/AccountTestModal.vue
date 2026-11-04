@@ -450,6 +450,24 @@ const startTest = async () => {
       throw new Error(`HTTP error! status: ${response.status}`)
     }
 
+    const contentType = response.headers.get('content-type') || ''
+    if (contentType.includes('application/json')) {
+      const payload = await response.json() as { data?: { success?: boolean; message?: string; latency_ms?: number }; message?: string }
+      const result = payload.data ?? payload
+      const message = result.message || payload.message || (result.success ? 'Account connectivity test succeeded' : 'Account connectivity test failed')
+      if (result.success) {
+        addLine(t('admin.accounts.connectedToApi'), 'text-green-400')
+        addLine(message, 'text-cyan-300')
+        if (typeof result.latency_ms === 'number') addLine(`Latency: ${result.latency_ms} ms`, 'text-gray-400')
+        status.value = 'success'
+      } else {
+        status.value = 'error'
+        errorMessage.value = message
+        addLine(`Error: ${message}`, 'text-red-400')
+      }
+      return
+    }
+
     const reader = response.body?.getReader()
     if (!reader) {
       throw new Error('No response body')
@@ -479,6 +497,12 @@ const startTest = async () => {
           }
         }
       }
+    }
+
+    if (status.value === 'connecting') {
+      status.value = 'error'
+      errorMessage.value = '测试连接已结束，但上游没有返回完整结果'
+      addLine('Error: 测试连接已结束，但上游没有返回完整结果', 'text-red-400')
     }
   } catch (error: unknown) {
     if (error instanceof DOMException && error.name === 'AbortError') {
