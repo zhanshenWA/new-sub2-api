@@ -343,13 +343,18 @@ export class D1AccountService {
             headers.set("authorization", `Bearer ${token}`);
         }
         const started = Date.now();
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15_000);
         try {
-            const response = await fetch(target, { method: "GET", headers });
+            const response = await fetch(target, { method: "GET", headers, signal: controller.signal });
             const latency_ms = Date.now() - started;
             if (!response.ok) return { success: false, message: `Upstream returned HTTP ${response.status}`, latency_ms };
             return { success: true, message: "Account connectivity test succeeded", latency_ms };
         } catch (error) {
-            return { success: false, message: error instanceof Error ? error.message : "Upstream request failed", latency_ms: Date.now() - started };
+            const timedOut = error instanceof Error && error.name === "AbortError";
+            return { success: false, message: timedOut ? "Upstream request timed out after 15 seconds" : error instanceof Error ? error.message : "Upstream request failed", latency_ms: Date.now() - started };
+        } finally {
+            clearTimeout(timeoutId);
         }
     }
 
