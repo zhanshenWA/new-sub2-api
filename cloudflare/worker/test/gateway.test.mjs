@@ -510,7 +510,7 @@ test("usage metadata: SSE stays byte-identical and charges exactly one ledger en
     assert.equal(row.reasoning_effort, "low");
     assert.equal(row.ip_address, "192.0.2.2");
     assert.equal(row.inbound_endpoint, "/v1/chat/completions");
-    assert.equal(row.upstream_endpoint, "/v1/chat/completions");
+    assert.equal(row.upstream_endpoint, sample.upstreamPath);
     assert.equal(typeof row.first_token_ms, "number");
     assert.ok(row.first_token_ms >= 0 && row.duration_ms >= row.first_token_ms);
     assert.equal(row.input_tokens, 100);
@@ -613,10 +613,10 @@ for (const sample of [
 
 // Verify the compatible upstream model ID directly, without rewriting requests.
 for (const sample of [
-    { stream: false, hour: 12, factor: 1, path: "/v1/chat/completions", base: "" },
-    { stream: true, hour: 12, factor: 1, path: "/chat/completions", base: "" },
-    { stream: false, hour: 2, factor: 2, path: "/chat/completions", base: "/v1" },
-    { stream: true, hour: 12, factor: 1, path: "/v1/chat/completions", base: "/v1" }
+    { stream: false, hour: 12, factor: 1, path: "/v1/chat/completions", base: "", upstreamPath: "/v1/chat/completions" },
+    { stream: true, hour: 12, factor: 1, path: "/chat/completions", base: "", upstreamPath: "/chat/completions" },
+    { stream: false, hour: 2, factor: 2, path: "/chat/completions", base: "/v1", upstreamPath: "/v1/chat/completions" },
+    { stream: true, hour: 12, factor: 1, path: "/v1/chat/completions", base: "/v1", upstreamPath: "/v1/chat/completions" }
 ]) {
     test("billing detail: direct Yituo V4.1 Flash routes and bills " + JSON.stringify(sample), async (t) => {
         t.mock.method(Date, "now", () => Date.UTC(2026, 10, 3, sample.hour));
@@ -647,7 +647,7 @@ for (const sample of [
         assert.equal(response.status, 200);
         assert.equal(await response.text(), wire);
         assert.deepEqual(captured, payload);
-        assert.equal(capturedUrl, "https://upstream.example/v1/chat/completions");
+        assert.equal(capturedUrl, "https://upstream.example" + sample.upstreamPath);
         const rows = await db.prepare("SELECT * FROM usage_logs").all();
         assert.equal(rows.results.length, 1);
         const row = rows.results[0];
