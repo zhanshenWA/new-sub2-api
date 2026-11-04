@@ -416,7 +416,13 @@ const startTest = async () => {
 
   abortStream()
 
-  abortController = new AbortController()
+  const controller = new AbortController()
+  abortController = controller
+  let timedOut = false
+  const timeoutId = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, 20_000)
 
   try {
     const requestBody: {
@@ -443,8 +449,10 @@ const startTest = async () => {
         [ADMIN_UI_REQUEST_HEADER]: '1'
       },
       body: JSON.stringify(requestBody),
-      signal: abortController.signal
+      signal: controller.signal
     })
+
+    if (abortController !== controller) return
 
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`)
@@ -458,6 +466,7 @@ const startTest = async () => {
         message?: string
         latency_ms?: number
       }
+      if (abortController !== controller) return
       const result = payload.data ?? payload
       const message = result.message || payload.message || (result.success ? 'Account connectivity test succeeded' : 'Account connectivity test failed')
       if (result.success) {
@@ -483,6 +492,7 @@ const startTest = async () => {
 
     while (true) {
       const { done, value } = await reader.read()
+      if (abortController !== controller) return
       if (done) break
 
       buffer += decoder.decode(value, { stream: true })
@@ -510,14 +520,18 @@ const startTest = async () => {
       addLine('Error: 测试连接已结束，但上游没有返回完整结果', 'text-red-400')
     }
   } catch (error: unknown) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
+    if (abortController !== controller) return
+    if (controller.signal.aborted && !timedOut) {
       status.value = 'idle'
       return
     }
     status.value = 'error'
-    const msg = error instanceof Error ? error.message : 'Unknown error'
+    const msg = timedOut ? '测试连接超时（20 秒），请检查上游服务后重试' : error instanceof Error ? error.message : 'Unknown error'
     errorMessage.value = msg
     addLine(`Error: ${msg}`, 'text-red-400')
+  } finally {
+    clearTimeout(timeoutId)
+    if (abortController === controller) abortController = null
   }
 }
 
