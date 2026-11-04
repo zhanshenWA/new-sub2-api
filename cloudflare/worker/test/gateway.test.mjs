@@ -510,7 +510,7 @@ test("usage metadata: SSE stays byte-identical and charges exactly one ledger en
     assert.equal(row.reasoning_effort, "low");
     assert.equal(row.ip_address, "192.0.2.2");
     assert.equal(row.inbound_endpoint, "/v1/chat/completions");
-    assert.equal(row.upstream_endpoint, sample.upstreamPath);
+    assert.equal(row.upstream_endpoint, "/v1/chat/completions");
     assert.equal(typeof row.first_token_ms, "number");
     assert.ok(row.first_token_ms >= 0 && row.duration_ms >= row.first_token_ms);
     assert.equal(row.input_tokens, 100);
@@ -654,7 +654,7 @@ for (const sample of [
         assert.equal(row.requested_model, "deepseek-v4.1-flash");
         assert.equal(row.upstream_model, "deepseek-v4.1-flash");
         assert.equal(row.inbound_endpoint, sample.path);
-        assert.equal(row.upstream_endpoint, "/v1/chat/completions");
+        assert.equal(row.upstream_endpoint, sample.upstreamPath);
         assert.deepEqual([row.input_tokens, row.output_tokens, row.cache_read_tokens], [6, 3, 4]);
         const expected = (6 * 0.15e-6 + 3 * 0.6e-6 + 4 * 0.003e-6) * sample.factor;
         assert.ok(Math.abs(row.actual_cost - expected) < 1e-12);
